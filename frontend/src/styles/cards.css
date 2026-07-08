@@ -1,0 +1,65 @@
+/* CHU 共享卡片样式：把 el-collapse 渲染成同色调圆角卡 + 微阴影。
+   作用域严格限定在 .chu-cards 内，避免影响其它 collapse。
+   通过 .chu-cards--think / .chu-cards--tool 切换色调。 */
+
+.chu-cards.el-collapse {
+  --el-collapse-border-color: transparent;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: transparent;
+}
+
+/* 每条 = 一张独立卡片 */
+.chu-cards .el-collapse-item {
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow);
+}
+.chu-cards .el-collapse-item:last-child {
+  margin-bottom: 0;
+}
+
+/* 表头：降高、加内边距、去分隔线 */
+.chu-cards .el-collapse-item__header {
+  height: auto;
+  line-height: 1.4;
+  padding: 9px 14px;
+  font-size: 13px;
+  background: transparent;
+  border-bottom: none;
+  border-radius: 12px;
+  color: var(--el-text-color-secondary);
+}
+.chu-cards .el-collapse-item__arrow {
+  color: var(--el-text-color-secondary);
+  margin: 0 0 0 auto;
+}
+.chu-cards .el-collapse-item__wrap {
+  background: transparent;
+  border-bottom: none;
+}
+/* 内容：合适的内边距 */
+.chu-cards .el-collapse-item__content {
+  padding: 2px 14px 12px;
+}
+/* 去掉 Element 的 focus 描边 */
+.chu-cards .el-collapse-item__header:focus,
+.chu-cards .el-collapse-item__header:focus-visible {
+  outline: none;
+}
+
+/* ── 色调变体（暖中性，Anthropic 调性） ─────────────────────── */
+.chu-cards--think {
+  --card-bg: #f4f1ea;
+  --card-border: #e6e1d6;
+  --card-shadow: 0 1px 3px rgba(60, 56, 50, 0.05);
+}
+.chu-cards--tool {
+  --card-bg: var(--clay-tint, #f3e6df);
+  --card-border: #ecd8cd;
+  --card-shadow: 0 1px 3px rgba(193, 95, 60, 0.06);
+}

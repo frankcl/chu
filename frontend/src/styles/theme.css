@@ -1,0 +1,106 @@
+/* CHU 主题 —— Anthropic / Claude 风格：暖象牙底、黏土陶橙强调、墨黑文字、编辑式极简。
+   覆盖 Element Plus CSS 变量 + 自定义 token。
+   必须在 element-plus/dist/index.css 之后引入才能生效。 */
+
+:root {
+  /* ── 黏土陶橙 primary ramp（Anthropic 标志色） ───────────────── */
+  --el-color-primary: #c15f3c;
+  --el-color-primary-light-3: #cf7d5f;
+  --el-color-primary-light-5: #dc9a82;
+  --el-color-primary-light-7: #e9b8a6;
+  --el-color-primary-light-8: #f0cabd;
+  --el-color-primary-light-9: #f6e2d9;
+  --el-color-primary-dark-2: #a44d2f;
+
+  /* ── 砖红 danger ramp（柔和） ───────────────────────────────── */
+  --el-color-danger: #b3402f;
+  --el-color-danger-light-3: #c66c5d;
+  --el-color-danger-light-5: #d6948a;
+  --el-color-danger-light-7: #e6bcb5;
+  --el-color-danger-light-8: #eed0cb;
+  --el-color-danger-light-9: #f6e4e1;
+  --el-color-danger-dark-2: #8f3325;
+
+  /* ── 暖琥珀 warning ─────────────────────────────────────────── */
+  --el-color-warning: #b8843f;
+  --el-color-warning-light-9: #f6efe2;
+
+  /* ── Element Plus 中性色映射到暖灰墨色 ──────────────────────── */
+  --el-text-color-primary: #1f1e1d;
+  --el-text-color-regular: #3d3b37;
+  --el-text-color-secondary: #6b6760;
+  --el-text-color-placeholder: #9a9389;
+  --el-border-color: #e6e2d8;
+  --el-border-color-light: #ece9e0;
+  --el-border-color-lighter: #f1eee7;
+  --el-fill-color: #f1eee7;
+  --el-fill-color-light: #f6f4ee;
+  --el-fill-color-blank: #ffffff;
+  --el-bg-color: #ffffff;
+  --el-bg-color-overlay: #ffffff;
+
+  /* ── Anthropic 自定义 token ─────────────────────────────────── */
+  --clay: #c15f3c;
+  --clay-deep: #a44d2f;
+  --clay-tint: #f3e6df;       /* 极浅陶橙底纹 */
+  --ink: #1f1e1d;             /* 主文字 */
+  --ink-soft: #6b6760;        /* 次要文字 */
+  --ink-faint: #9a9389;       /* 占位 */
+  --paper: #faf9f5;           /* 全站背景：暖象牙 */
+  --paper-deep: #f0eee6;      /* 侧栏 / 下沉面 */
+  --surface: #ffffff;         /* 卡片 / 助手气泡 */
+  --surface-warm: #f6f4ee;    /* 暖色面 */
+  --sand: #efeae0;            /* 用户气泡：暖沙 */
+  --line: #e6e2d8;            /* 边框 */
+  --line-soft: #efece4;
+
+  /* 字体：编辑式 serif 标题 + 暖人文 grotesque 正文；中文回退系统字 */
+  --font-display: 'Newsreader', 'Songti SC', 'Noto Serif SC', Georgia, serif;
+  --font-body: 'Hanken Grotesk', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
+
+  --el-font-family: var(--font-body);
+}
+
+/* 全站背景：暖象牙 + 极轻噪点纹理（营造纸感） */
+html, body {
+  background-color: var(--paper);
+}
+body {
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 主题化滚动条（暖灰，极简） */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 110, 95, 0.28);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 110, 95, 0.45);
+  background-clip: padding-box;
+}
+
+/* Element Plus 按钮微调：陶橙主按钮更柔和、圆角更克制 */
+.el-button {
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+.el-button--primary {
+  --el-button-bg-color: var(--clay);
+  --el-button-border-color: var(--clay);
+  --el-button-hover-bg-color: var(--clay-deep);
+  --el-button-hover-border-color: var(--clay-deep);
+  --el-button-active-bg-color: var(--clay-deep);
+}

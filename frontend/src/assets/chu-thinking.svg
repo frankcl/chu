@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 100 100">
+  
+  <g transform="translate(50,50)">
+    <path class="spark-main" fill="#E0A82E" d="M0 -30 C4 -8 8 -4 30 0 C8 4 4 8 0 30 C-4 8 -8 4 -30 0 C-8 -4 -4 -8 0 -30 Z"></path>
+    <g transform="translate(26,-24)"><path class="spark-mini" fill="#E0A82E" d="M0 -9 C1.2 -2.4 2.4 -1.2 9 0 C2.4 1.2 1.2 2.4 0 9 C-1.2 2.4 -2.4 1.2 -9 0 C-2.4 -1.2 -1.2 -2.4 0 -9 Z"></path></g>
+    <g transform="translate(-27,23)"><path class="spark-mini2" fill="#D97757" d="M0 -7 C1 -1.9 1.9 -1 7 0 C1.9 1 1 1.9 0 7 C-1 1.9 -1.9 1 -7 0 C-1.9 -1 -1 -1.9 0 -7 Z"></path></g>
+  </g>
+</svg>
