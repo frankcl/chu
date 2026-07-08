@@ -11,3 +11,6 @@ wheels/
 
 # Generated artifacts (ppt decks, etc.) served via /api/files
 generated/
+
+# frontend library
+node_modules/
