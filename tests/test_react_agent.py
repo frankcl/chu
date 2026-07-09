@@ -121,6 +121,35 @@ class TestCreateAgent:
         result = agent.invoke({"messages": [("human", "capital of France?")]})
         assert "Paris" in result["messages"][-1].content
 
+    async def test_astream_emits_model_chunks_as_custom_events(self, mocker):
+        from langchain_core.messages import AIMessage, AIMessageChunk
+
+        mock_llm = MagicMock()
+        mock_bound = MagicMock()
+        mock_llm.bind_tools.return_value = mock_bound
+        mock_bound.with_retry.return_value = mock_bound
+        mock_bound.invoke.return_value = AIMessage(content="fallback")
+
+        async def fake_astream(_messages):
+            yield AIMessageChunk(content="stream ")
+            yield AIMessageChunk(content="answer")
+
+        mock_bound.astream = fake_astream
+        mocker.patch("agent.llm.LLM.chat_model", return_value=mock_llm)
+
+        from agent.react_agent import create_agent
+        agent = create_agent()
+        events = []
+        async for mode, data in agent.astream(
+            {"messages": [("human", "hello")]},
+            stream_mode=["custom", "updates"],
+        ):
+            if mode == "custom":
+                events.append(data)
+
+        assert {"phase": "agent_text", "text": "stream "} in events
+        assert {"phase": "agent_text", "text": "answer"} in events
+
     def test_extra_tools_passed_to_bind_tools(self, mocker):
         mock_llm, _ = self._make_mock_llm()
         mocker.patch("agent.llm.LLM.chat_model", return_value=mock_llm)

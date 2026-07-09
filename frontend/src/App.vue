@@ -17,7 +17,7 @@
 
     <div class="main">
       <ChatWindow :messages="currentMessages" :user="user" />
-      <ChatInput :streaming="streaming" v-model:mode="mode" @send="onSend" @stop="onStop" />
+      <ChatInput :streaming="streaming" :mode="mode" @update:mode="setMode" @send="onSend" @stop="onStop" />
     </div>
   </div>
 
@@ -34,7 +34,7 @@ import ChatInput from './components/ChatInput.vue'
 import LoginDialog from './components/LoginDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import {
-  createSession, streamChat, cancelChat, generateTitle, respondHitl,
+  createSession, deleteSession, streamChat, cancelChat, generateTitle, respondHitl,
 } from './api/chat.js'
 import {
   listConversations, getConversation, deleteConversation, clearAllConversations,
@@ -168,6 +168,39 @@ function uid() {
   return Math.random().toString(36).slice(2, 10)
 }
 
+async function ensureSessionMode(session, targetMode) {
+  if (!session || session.mode === targetMode) return
+  const priorMode = session.mode
+  const priorId = session.id
+  const priorSessionId = session.sessionId
+  session.mode = targetMode
+  try {
+    if (!session.messages.length) {
+      const sessionId = await createSession(targetMode)
+      if (priorSessionId) deleteSession(priorSessionId).catch(() => {})
+      session.id = sessionId
+      session.sessionId = sessionId
+      currentSessionId.value = sessionId
+      return
+    }
+    const sessionId = await createSession(targetMode, { conversation_id: session.id })
+    session.sessionId = sessionId
+  } catch (e) {
+    session.id = priorId
+    session.sessionId = priorSessionId
+    session.mode = priorMode
+    mode.value = priorMode
+    ElMessage.error(`切换模式失败: ${e.message}`)
+  }
+}
+
+function setMode(nextMode) {
+  mode.value = nextMode
+  const session = currentSession.value
+  if (!session || streaming.value) return
+  ensureSessionMode(session, nextMode)
+}
+
 
 async function newChat() {
   try {
@@ -270,6 +303,8 @@ async function onSend(text) {
   }
 
   const session = currentSession.value
+  await ensureSessionMode(session, mode.value)
+  if (session.mode !== mode.value) return
 
   // Add user message
   session.messages.push({ id: uid(), role: 'user', content: text, done: true, time: formatDateTime() })
@@ -300,7 +335,7 @@ async function onSend(text) {
     steps: [],
     phase: '',          // '' | 'planning' | 'summarizing'
     activeStep: -1,     // 1-based; -1 = none in progress
-    stepStreams: [],    // [{ task, text, tools: [] }] aligned with plan
+    stepStreams: [],    // [{ task, text, thinking, tools: [], status }] aligned with plan
     hitl: null,         // { id, prompt, options } while a human choice is pending
     done: false,
     time: formatDateTime(),
@@ -325,10 +360,42 @@ async function onSend(text) {
   currentController.value = streamChat(session.sessionId, text, {
     onThinking: t => { msg.thinking += t },
     onText:     t => { msg.content += t },
-    onTool:     (name, result) => { msg.tools.push({ name, result }) },
+    onHeartbeat: () => {},
+    onToolStart: (name, input) => {
+      const result = input ? `运行中...\n\n${input}` : '运行中...'
+      const pending = [...msg.tools].reverse()
+        .find(t => t.name === name && t.status === 'running' && t.result === result)
+      if (pending) {
+        pending.status = 'running'
+        pending.result = result
+      } else {
+        msg.tools.push({ name, result, status: 'running' })
+      }
+    },
+    onTool:     (name, result) => {
+      const pendingIndex = msg.tools.findIndex(t => t.name === name && t.status === 'running')
+      if (pendingIndex >= 0) {
+        msg.tools[pendingIndex].result = result
+        msg.tools[pendingIndex].status = 'success'
+        for (let i = msg.tools.length - 1; i > pendingIndex; i--) {
+          if (msg.tools[i].name === name && msg.tools[i].status === 'running') {
+            msg.tools.splice(i, 1)
+          }
+        }
+      } else {
+        msg.tools.push({ name, result, status: 'success' })
+      }
+    },
     onPlan:     steps => {
       msg.plan = steps
-      msg.stepStreams = steps.map(task => ({ task, text: '', thinking: '', tools: [] }))
+      msg.stepStreams = steps.map(task => ({
+        task,
+        text: '',
+        thinking: '',
+        thinkingActive: false,
+        tools: [],
+        status: 'wait',
+      }))
       msg.phase = ''        // planning phase ends once plan arrives
     },
     onStep:     (step, result) => { msg.steps.push({ step, result }) },
@@ -336,16 +403,81 @@ async function onSend(text) {
     onPhase:    p => { msg.phase = p },
     onStepStart: (n, _total, task) => {
       msg.activeStep = n
-      if (msg.stepStreams[n - 1]) msg.stepStreams[n - 1].task = task
+      if (msg.stepStreams[n - 1]) {
+        msg.stepStreams[n - 1].task = task
+        msg.stepStreams[n - 1].status = 'process'
+        msg.stepStreams[n - 1].thinkingActive = true
+      }
     },
     onStepToken: (n, text) => {
-      if (msg.stepStreams[n - 1]) msg.stepStreams[n - 1].text += text
+      if (msg.stepStreams[n - 1]) {
+        msg.stepStreams[n - 1].text += text
+        msg.stepStreams[n - 1].thinkingActive = false
+      }
     },
     onStepThinking: (n, text) => {
-      if (msg.stepStreams[n - 1]) msg.stepStreams[n - 1].thinking += text
+      if (msg.stepStreams[n - 1]) {
+        msg.stepStreams[n - 1].thinking += text
+        msg.stepStreams[n - 1].thinkingActive = true
+      }
     },
-    onStepTool: (n, name, result) => {
-      if (msg.stepStreams[n - 1]) msg.stepStreams[n - 1].tools.push({ name, result })
+    onStepTool: (n, name, result, toolCallId) => {
+      const step = msg.stepStreams[n - 1]
+      if (!step) return
+      let pendingIndex = toolCallId
+        ? step.tools.findIndex(t => t.id === toolCallId)
+        : -1
+      if (pendingIndex < 0) {
+        pendingIndex = step.tools.findIndex(t => t.name === name && t.status === 'running')
+      }
+      if (pendingIndex >= 0) {
+        if (toolCallId) step.tools[pendingIndex].id = toolCallId
+        step.tools[pendingIndex].result = result
+        step.tools[pendingIndex].status = 'success'
+        for (let i = step.tools.length - 1; i > pendingIndex; i--) {
+          if ((toolCallId && step.tools[i].id === toolCallId)
+            || (step.tools[i].name === name && step.tools[i].status === 'running')) {
+            step.tools.splice(i, 1)
+          }
+        }
+      } else {
+        step.tools.push({ id: toolCallId, name, result, status: 'success' })
+      }
+    },
+    onStepToolStart: (n, name, input, toolCallId) => {
+      const step = msg.stepStreams[n - 1]
+      if (!step) return
+      const result = input || ''
+      let pending = toolCallId
+        ? [...step.tools].reverse().find(t => t.id === toolCallId)
+        : null
+      if (!pending) {
+        pending = [...step.tools].reverse()
+          .find(t => t.name === name && t.status === 'running' && t.result === result)
+      }
+      if (pending) {
+        if (toolCallId && !pending.id) pending.id = toolCallId
+        pending.status = 'running'
+        pending.result = result
+      } else {
+        step.tools.push({ id: toolCallId, name, result, status: 'running' })
+      }
+    },
+    onStepDone: n => {
+      if (msg.stepStreams[n - 1]) {
+        msg.stepStreams[n - 1].status = 'success'
+        msg.stepStreams[n - 1].thinkingActive = false
+      }
+    },
+    onStepFailed: (n, message) => {
+      if (msg.stepStreams[n - 1]) {
+        msg.stepStreams[n - 1].status = 'error'
+        msg.stepStreams[n - 1].thinkingActive = false
+        msg.stepStreams[n - 1].tools
+          .filter(t => t.status === 'running')
+          .forEach(t => { t.status = 'error' })
+        msg.stepStreams[n - 1].text += `${msg.stepStreams[n - 1].text ? '\n' : ''}[失败: ${message}]`
+      }
     },
     onHitl:     (id, prompt, options, preview) => { msg.hitl = { id, prompt, options, preview } },
     onLimit:    (reason, m) => {

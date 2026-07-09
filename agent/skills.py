@@ -22,9 +22,11 @@ from .log import get_logger
 logger = get_logger("skills")
 
 _SKILL_FILE = "SKILL.md"
-# 每轮请求内，同一个 (skill, script) 最多可运行的次数（硬闸，超限优雅拒绝而非中止整轮）。
-# 计数容器由服务端每轮放入 config["configurable"]["skill_call_counts"]；缺失则不限制
-# （fail-open：CLI / 未注入的路径不受影响）。
+# 普通 ReAct 每轮请求内，同一个 (skill, script) 最多可运行的次数（硬闸，超限
+# 优雅拒绝而非中止整轮）。Plan-Execute 会按 plan_task_id 另行做每任务计数，
+# 避免并发调研任务互相抢同一个搜索脚本 cap。
+# 计数容器由服务端每轮放入 config["configurable"]["skill_call_counts"]；缺失则
+# 不限制（fail-open：CLI / 未注入的路径不受影响）。
 _MAX_SKILL_SCRIPT_CALLS_DEFAULT = 3
 # 针对特定脚本的单独上限，覆盖全局 MAX_SKILL_SCRIPT_CALLS。键为 "skill/script"。
 # 内置：ppt/build.py 每轮至多 2 次——与 skills/ppt/SKILL.md 的约定一致（一次构建、
@@ -304,12 +306,19 @@ def build_skill_tools(registry: SkillRegistry, per_tool_timeout: float) -> list[
         # 而不是抛异常中止整轮）。计数容器由服务端每轮注入；缺失则不限制。
         counts = None
         try:
-            counts = (config or {}).get("configurable", {}).get("skill_call_counts")
+            configurable = (config or {}).get("configurable", {})
+            counts = configurable.get("skill_call_counts")
         except Exception:  # noqa: BLE001 — 计数不可用时一律放行
             counts = None
         if counts is not None:
-            cap = _script_call_cap(skill, script)
-            key = f"{skill}/{script}"
+            base_key = f"{skill}/{script}"
+            task_id = configurable.get("plan_task_id")
+            if task_id:
+                cap = int(configurable.get("max_skill_script_calls_per_task") or 3)
+                key = f"task:{task_id}:{base_key}"
+            else:
+                cap = _script_call_cap(skill, script)
+                key = f"global:{base_key}"
             counts[key] = counts.get(key, 0) + 1
             if counts[key] > cap:
                 logger.info("skill script cap hit key=%s count=%d cap=%d", key, counts[key], cap)

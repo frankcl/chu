@@ -13,6 +13,8 @@ from agent.harness import (
     BudgetExceededError,
     BudgetTracker,
     HarnessConfig,
+    TaskBudgetExceededError,
+    TaskBudgetTracker,
     apply_llm_retry,
     wrap_tools,
 )
@@ -24,7 +26,8 @@ class TestHarnessConfigFromEnv:
     def test_defaults_when_env_unset(self, monkeypatch):
         for key in (
             "RECURSION_LIMIT", "IDLE_TIMEOUT_SECONDS", "PER_TOOL_TIMEOUT_SECONDS",
-            "MAX_TOOL_CALLS", "MAX_TOKENS_BUDGET", "LLM_MAX_RETRIES",
+            "MAX_TOOL_CALLS", "MAX_TOOL_CALLS_PER_TASK",
+            "MAX_SKILL_SCRIPT_CALLS_PER_TASK", "MAX_TOKENS_BUDGET", "LLM_MAX_RETRIES",
             "TOOL_ALLOWLIST", "TOOL_DENYLIST",
         ):
             monkeypatch.delenv(key, raising=False)
@@ -33,6 +36,8 @@ class TestHarnessConfigFromEnv:
         assert cfg.idle_timeout == 60.0
         assert cfg.per_tool_timeout == 30.0
         assert cfg.max_tool_calls == 20
+        assert cfg.max_tool_calls_per_task == 8
+        assert cfg.max_skill_script_calls_per_task == 3
         assert cfg.max_tokens == 200_000
         assert cfg.llm_max_retries == 2
         assert cfg.tool_allowlist is None
@@ -42,12 +47,16 @@ class TestHarnessConfigFromEnv:
         monkeypatch.setenv("RECURSION_LIMIT", "7")
         monkeypatch.setenv("IDLE_TIMEOUT_SECONDS", "12.5")
         monkeypatch.setenv("MAX_TOOL_CALLS", "3")
+        monkeypatch.setenv("MAX_TOOL_CALLS_PER_TASK", "4")
+        monkeypatch.setenv("MAX_SKILL_SCRIPT_CALLS_PER_TASK", "2")
         monkeypatch.setenv("TOOL_DENYLIST", "python_repl, write_file")
         monkeypatch.setenv("TOOL_ALLOWLIST", "")
         cfg = HarnessConfig.from_env()
         assert cfg.recursion_limit == 7
         assert cfg.idle_timeout == 12.5
         assert cfg.max_tool_calls == 3
+        assert cfg.max_tool_calls_per_task == 4
+        assert cfg.max_skill_script_calls_per_task == 2
         assert cfg.tool_denylist == ["python_repl", "write_file"]
         assert cfg.tool_allowlist is None  # empty string → None (allow all)
 
@@ -118,6 +127,16 @@ class TestBudgetTracker:
         result = LLMResult(generations=[[ChatGeneration(message=msg)]])
         t.on_llm_end(result)
         assert t.total_tokens == 0
+
+
+class TestTaskBudgetTracker:
+    def test_tool_call_budget_exceeded_raises_task_error(self):
+        t = TaskBudgetTracker("task-a", HarnessConfig(max_tool_calls_per_task=1))
+        t.on_tool_start({}, "x")
+        with pytest.raises(TaskBudgetExceededError) as ei:
+            t.on_tool_start({}, "x")
+        assert ei.value.task_id == "task-a"
+        assert ei.value.reason == "tool_calls_per_task"
 
 
 # ── wrap_tools (filter + timeout) ────────────────────────────────────────────
@@ -294,12 +313,16 @@ class TestSessionHarnessOverrides:
         resp = client.post("/api/sessions", json={
             "mode": "react",
             "max_tool_calls": 1,
+            "max_tool_calls_per_task": 2,
+            "max_skill_script_calls_per_task": 3,
             "idle_timeout": 5.0,
             "tool_denylist": ["python_repl"],
         })
         sid = resp.json()["session_id"]
         cfg = server.sessions[sid]["harness"]
         assert cfg.max_tool_calls == 1
+        assert cfg.max_tool_calls_per_task == 2
+        assert cfg.max_skill_script_calls_per_task == 3
         assert cfg.idle_timeout == 5.0
         assert "python_repl" in cfg.tool_denylist
 
@@ -386,10 +409,10 @@ class TestIdleTimeoutBehavior:
         finally:
             teardown()
 
-    def test_timeout_when_silent(self):
-        """No events for longer than idle_timeout → limit:idle is emitted."""
+    def test_heartbeat_when_silent(self):
+        """No business events while producer runs → heartbeat keeps stream alive."""
         async def fake_astream(*args, **kwargs):
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.8)
             # never yields — but type-wise we must still be an async generator
             if False:
                 yield None  # pragma: no cover
@@ -401,9 +424,11 @@ class TestIdleTimeoutBehavior:
             }).json()["session_id"]
             resp = client.post(f"/api/chat/{sid}", json={"message": "go"})
             events = self._parse_sse(resp.text)
+            heartbeat_events = [e for e in events if e.get("type") == "heartbeat"]
             limit_events = [e for e in events if e.get("type") == "limit"]
-            assert len(limit_events) == 1
-            assert limit_events[0]["reason"] == "idle"
-            assert "0.3" in limit_events[0]["message"]
+            done_events = [e for e in events if e.get("type") == "done"]
+            assert heartbeat_events
+            assert limit_events == []
+            assert len(done_events) == 1
         finally:
             teardown()

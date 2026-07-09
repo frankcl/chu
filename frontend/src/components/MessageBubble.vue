@@ -181,7 +181,7 @@ const renderedContent = computed(() =>
 const renderedThinking = computed(() => renderMarkdown(props.msg.thinking))
 const renderedTools = computed(() =>
   (props.msg.tools || []).map(t => ({
-    name: t.name,
+    name: t.status === 'running' ? `${t.name}（运行中）` : t.name,
     html: renderMarkdown(t.result),
   }))
 )

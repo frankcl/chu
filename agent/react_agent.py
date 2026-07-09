@@ -6,7 +6,9 @@ agent 节点调用 LLM，tools 节点执行工具，循环至模型不再请求�
 
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, BaseMessageChunk, SystemMessage, message_chunk_to_message
+from langchain_core.runnables import RunnableLambda
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -75,12 +77,38 @@ class ReActAgent:
                 logger.debug("agent requested tools: %s", [tc["name"] for tc in response.tool_calls])
             return {"messages": [response]}
 
+        async def acall_model(state: AgentState):
+            logger.debug("agent node invoked, messages=%d", len(state["messages"]))
+            messages = [SystemMessage(content=system_prompt)] + state["messages"]
+            try:
+                writer = get_stream_writer()
+            except RuntimeError:
+                writer = None
+            chunk: BaseMessageChunk | None = None
+            async for part in bound.astream(messages):
+                if isinstance(part, BaseMessageChunk):
+                    if writer is not None:
+                        for kind, text in LLM.iter_outputs(part):
+                            writer({"phase": f"agent_{kind}", "text": text})
+                    chunk = part if chunk is None else chunk + part
+                else:
+                    response = part
+                    break
+            else:
+                if chunk is None:
+                    response = await bound.ainvoke(messages)
+                else:
+                    response = message_chunk_to_message(chunk)
+            if response.tool_calls:
+                logger.debug("agent requested tools: %s", [tc["name"] for tc in response.tool_calls])
+            return {"messages": [response]}
+
         def should_continue(state: AgentState) -> str:
             last = state["messages"][-1]
             return "tools" if last.tool_calls else END
 
         graph = StateGraph(AgentState)
-        graph.add_node("agent", call_model)
+        graph.add_node("agent", RunnableLambda(call_model, afunc=acall_model))
         graph.add_node("tools", tool_node)
         graph.add_edge(START, "agent")
         graph.add_conditional_edges("agent", should_continue)

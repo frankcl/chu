@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from hylian_client.sdk import context
 from hylian_client.sdk.fastapi import enable_hylian_shield
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from starlette.concurrency import run_in_threadpool
 from langgraph.checkpoint.memory import MemorySaver
@@ -279,6 +280,9 @@ class SessionRequest(BaseModel):
     idle_timeout: float | None = None
     per_tool_timeout: float | None = None
     max_tool_calls: int | None = None
+    max_tool_calls_per_task: int | None = None
+    max_skill_script_calls_per_task: int | None = None
+    max_parallel_tasks: int | None = None
     max_tokens: int | None = None
     llm_max_retries: int | None = None
     tool_allowlist: list[str] | None = None
@@ -351,6 +355,23 @@ def _is_content_moderation_error(exc: Exception) -> bool:
     )
 
 
+class _SseToolStartCallback(BaseCallbackHandler):
+    """Emit a generic SSE tool_start event for ReAct mode tool calls."""
+
+    def __init__(self, emit):
+        self.emit = emit
+
+    def on_tool_start(self, serialized, input_str, **kwargs):  # type: ignore[override]
+        name = ""
+        if isinstance(serialized, dict):
+            name = serialized.get("name") or serialized.get("id") or ""
+        self.emit({
+            "type": "tool_start",
+            "name": str(name or "tool"),
+            "input": str(input_str or "")[:500],
+        })
+
+
 def _harness_from_request(body: SessionRequest) -> HarnessConfig:
     overrides = body.model_dump(exclude={"mode"}, exclude_none=True)
     return HarnessConfig.from_env().merge(overrides)
@@ -409,12 +430,13 @@ def create_session(body: SessionRequest):
         session_id = body.conversation_id
         if db.get_owner(session_id) != user_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        if session_id not in sessions:
+        existing = sessions.get(session_id)
+        if existing is None or existing.get("mode") != body.mode:
             record = _build_session_record(session_id, body.mode, harness, user_id)
             n = _rebuild_memory(record, session_id, user_id)
             sessions[session_id] = record
-            logger.info("session continued id=%s mode=%s rebuilt_msgs=%d",
-                        session_id, body.mode, n)
+            logger.info("session continued id=%s mode=%s rebuilt_msgs=%d replaced=%s",
+                        session_id, body.mode, n, existing is not None)
     else:
         # 新对话：生成一个 id 兼作 thread_id；chat_session 首消息落库时懒创建。
         session_id = str(uuid.uuid4())
@@ -652,7 +674,11 @@ async def chat(session_id: str, body: ChatRequest):
     run_config = {
         # skill_call_counts：本轮 run_skill_script 的每 (skill,script) 计数容器，
         # 供 skills.py 的硬闸限制反复触发（如 web-research 搜索）。每轮新建即重置。
-        "configurable": {"thread_id": session["thread_id"], "skill_call_counts": {}},
+        "configurable": {
+            "thread_id": session["thread_id"],
+            "skill_call_counts": {},
+            "max_skill_script_calls_per_task": harness.max_skill_script_calls_per_task,
+        },
         "recursion_limit": harness.recursion_limit,
         "callbacks": [tracker],
     }
@@ -666,6 +692,8 @@ async def chat(session_id: str, body: ChatRequest):
     # request_user_choice tool then awaits the user's answer (POST /respond).
     hitl: HitlChannel = session["hitl"]
     hitl.bind_emit(queue.put_nowait)
+    if mode == "react":
+        run_config["callbacks"].append(_SseToolStartCallback(queue.put_nowait))
 
     # 对话历史落库：session_id == chat_session.id。用户消息先落库、AI 产出累积后
     # 在流终止点落库（部分完成也存）。未配置 MySQL / 未登录则跳过。
@@ -698,7 +726,16 @@ async def chat(session_id: str, body: ChatRequest):
     async def produce_plan_execute():
         try:
             async for mode, data in agent.astream(
-                {"input": body.message, "plan": [], "past_steps": [], "response": None},
+                {
+                    "input": body.message,
+                    "plan": [],
+                    "plan_total": 0,
+                    "tasks": [],
+                    "task_results": {},
+                    "task_errors": {},
+                    "past_steps": [],
+                    "response": None,
+                },
                 config=run_config,
                 stream_mode=["updates", "custom"],
             ):
@@ -709,6 +746,7 @@ async def chat(session_id: str, body: ChatRequest):
                     elif phase == "execute_start":
                         await queue.put({
                             "type": "step_start",
+                            "task_id": data.get("task_id"),
                             "step_num": data["step_num"],
                             "total": data["total"],
                             "task": data["task"],
@@ -716,21 +754,47 @@ async def chat(session_id: str, body: ChatRequest):
                     elif phase == "execute_token":
                         await queue.put({
                             "type": "step_token",
+                            "task_id": data.get("task_id"),
                             "step_num": data["step_num"],
                             "text": data["text"],
                         })
                     elif phase == "execute_thinking":
                         await queue.put({
                             "type": "step_thinking",
+                            "task_id": data.get("task_id"),
                             "step_num": data["step_num"],
                             "text": data["text"],
                         })
                     elif phase == "execute_tool":
                         await queue.put({
                             "type": "step_tool",
+                            "task_id": data.get("task_id"),
                             "step_num": data["step_num"],
+                            "tool_call_id": data.get("tool_call_id"),
                             "name": data["name"],
                             "result": data["result"],
+                        })
+                    elif phase == "execute_tool_start":
+                        await queue.put({
+                            "type": "step_tool_start",
+                            "task_id": data.get("task_id"),
+                            "step_num": data["step_num"],
+                            "tool_call_id": data.get("tool_call_id"),
+                            "name": data["name"],
+                            "input": data.get("input", ""),
+                        })
+                    elif phase == "execute_done":
+                        await queue.put({
+                            "type": "step_done",
+                            "task_id": data.get("task_id"),
+                            "step_num": data["step_num"],
+                        })
+                    elif phase == "execute_failed":
+                        await queue.put({
+                            "type": "step_failed",
+                            "task_id": data.get("task_id"),
+                            "step_num": data["step_num"],
+                            "message": data["error"],
                         })
                     elif phase == "summarize_start":
                         await queue.put({"type": "phase", "phase": "summarizing"})
@@ -768,29 +832,27 @@ async def chat(session_id: str, body: ChatRequest):
         producer = asyncio.create_task(producer_coro)
         session["active_task"] = producer
         # idle timeout: each wait_for caps the gap between two events, not
-        # the overall stream duration — actively-streaming sessions never trip it.
+        # the overall stream duration. If the producer is still running, a quiet
+        # period means a long LLM/tool call is in flight, so emit a heartbeat
+        # instead of killing the request.
         idle = harness.idle_timeout if harness.idle_timeout else None
+        heartbeat_interval = min(15.0, idle) if idle is not None else None
         try:
-            try:
-                while True:
-                    # While a HITL question is outstanding, the human is deciding —
-                    # that is not an idle/stuck stream, so don't apply the idle timeout.
-                    if idle is not None and not hitl.is_pending():
-                        item = await asyncio.wait_for(queue.get(), timeout=idle)
-                    else:
-                        item = await queue.get()
-                    if item is SENTINEL:
-                        break
-                    recorder.observe(item)  # 累积 AI 产出用于落库
-                    yield _sse(item)
-            except asyncio.TimeoutError:
-                producer.cancel()
-                logger.warning("stream idle timeout session=%s no activity for %.1fs",
-                               session_id, harness.idle_timeout)
-                yield _sse({"type": "limit", "reason": "idle",
-                            "message": f"no activity for {harness.idle_timeout:g}s"})
-                yield _sse({"type": "done"})
-                return
+            while True:
+                # While a HITL question is outstanding, the human is deciding —
+                # that is not an idle/stuck stream, so don't apply the heartbeat timeout.
+                timeout = heartbeat_interval if heartbeat_interval is not None and not hitl.is_pending() else None
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    if producer.done():
+                        continue
+                    await queue.put({"type": "heartbeat"})
+                    continue
+                if item is SENTINEL:
+                    break
+                recorder.observe(item)  # 累积 AI 产出用于落库
+                yield _sse(item)
 
             # SENTINEL received — surface producer outcome
             try:

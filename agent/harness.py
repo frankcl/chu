@@ -38,6 +38,16 @@ class BudgetExceededError(RuntimeError):
         self.message = message
 
 
+class TaskBudgetExceededError(RuntimeError):
+    """Raised when a single plan task exceeds its local runtime budget."""
+
+    def __init__(self, task_id: str, reason: str, message: str):
+        super().__init__(message)
+        self.task_id = task_id
+        self.reason = reason
+        self.message = message
+
+
 # ── config ──────────────────────────────────────────────────────────────────
 
 def _env_int(name: str, default: int) -> int:
@@ -76,6 +86,9 @@ class HarnessConfig:
     idle_timeout: float = 60.0
     per_tool_timeout: float = 30.0
     max_tool_calls: int = 20
+    max_tool_calls_per_task: int = 8
+    max_skill_script_calls_per_task: int = 3
+    max_parallel_tasks: int = 3
     max_tokens: int = 200_000
     llm_max_retries: int = 2
     tool_allowlist: list[str] | None = None  # None = allow all
@@ -89,6 +102,9 @@ class HarnessConfig:
             idle_timeout=_env_float("IDLE_TIMEOUT_SECONDS", 60.0),
             per_tool_timeout=_env_float("PER_TOOL_TIMEOUT_SECONDS", 30.0),
             max_tool_calls=_env_int("MAX_TOOL_CALLS", 20),
+            max_tool_calls_per_task=_env_int("MAX_TOOL_CALLS_PER_TASK", 8),
+            max_skill_script_calls_per_task=_env_int("MAX_SKILL_SCRIPT_CALLS_PER_TASK", 3),
+            max_parallel_tasks=_env_int("MAX_PARALLEL_TASKS", 3),
             max_tokens=_env_int("MAX_TOKENS_BUDGET", 200_000),
             llm_max_retries=_env_int("LLM_MAX_RETRIES", 2),
             tool_allowlist=allow or None,
@@ -158,6 +174,35 @@ class BudgetTracker(BaseCallbackHandler):
             raise BudgetExceededError(
                 "tool_calls",
                 f"tool-call budget exceeded: {self.tool_calls} > {self.cfg.max_tool_calls}",
+            )
+
+
+class TaskBudgetTracker(BaseCallbackHandler):
+    """Per-plan-task tool-call budget.
+
+    Attach this only to the inner executor run for one plan task. A budget hit
+    should fail that task, not the whole user turn; the plan executor catches
+    TaskBudgetExceededError and summarizes partial results.
+    """
+
+    raise_error = True
+
+    def __init__(self, task_id: str, cfg: HarnessConfig):
+        self.task_id = task_id
+        self.cfg = cfg
+        self.tool_calls = 0
+
+    def on_tool_start(self, serialized, input_str, **kwargs):  # type: ignore[override]
+        self.tool_calls += 1
+        limit = self.cfg.max_tool_calls_per_task
+        if limit and self.tool_calls > limit:
+            raise TaskBudgetExceededError(
+                self.task_id,
+                "tool_calls_per_task",
+                (
+                    f"task {self.task_id!r} tool-call budget exceeded: "
+                    f"{self.tool_calls} > {limit}"
+                ),
             )
 
 

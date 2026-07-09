@@ -12,7 +12,13 @@ from .plan_execute_agent import (  # noqa: E402
     run_plan_execute_agent,
 )
 from .skills import Skill, SkillRegistry  # noqa: E402
-from .harness import BudgetExceededError, BudgetTracker, HarnessConfig  # noqa: E402
+from .harness import (  # noqa: E402
+    BudgetExceededError,
+    BudgetTracker,
+    HarnessConfig,
+    TaskBudgetExceededError,
+    TaskBudgetTracker,
+)
 from .hitl import ConsoleHitlChannel, HitlChannel  # noqa: E402
 
 __all__ = [
@@ -36,6 +42,8 @@ __all__ = [
     "HarnessConfig",
     "BudgetTracker",
     "BudgetExceededError",
+    "TaskBudgetTracker",
+    "TaskBudgetExceededError",
     # hitl
     "HitlChannel",
     "ConsoleHitlChannel",

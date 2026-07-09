@@ -275,6 +275,28 @@ class TestChat:
         assert tool_events[0]["name"] == "get_weather"
         assert "sunny" in tool_events[0]["result"]
 
+    def test_react_stream_tool_start_event(self, client, mock_react_agent):
+        """Tool start callback → 'tool_start' SSE before the ToolMessage returns."""
+        from langchain_core.messages import ToolMessage
+
+        tool_msg = ToolMessage(content="sunny", name="get_weather", tool_call_id="1")
+
+        async def fake_astream(*args, **kwargs):
+            for cb in kwargs["config"]["callbacks"]:
+                if cb.__class__.__name__ == "_SseToolStartCallback":
+                    cb.on_tool_start({"name": "get_weather"}, '{"location":"Paris"}')
+            yield tool_msg, {"langgraph_node": "tools"}
+
+        mock_react_agent.astream = fake_astream
+
+        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
+        resp = client.post(f"/api/chat/{session_id}", json={"message": "weather?"})
+
+        events = _parse_sse(resp.text)
+        starts = [e for e in events if e.get("type") == "tool_start"]
+        assert starts and starts[0]["name"] == "get_weather"
+        assert "Paris" in starts[0]["input"]
+
     def test_plan_execute_stream_plan_event(self, client, mock_plan_execute_agent):
         """plan node update → 'plan' SSE event with steps list."""
         async def fake_astream(*args, **kwargs):
@@ -318,6 +340,7 @@ class TestChat:
             yield "custom", {"phase": "execute_start", "step_num": 1, "total": 1, "task": "s1"}
             yield "custom", {"phase": "execute_thinking", "step_num": 1, "text": "let me reason"}
             yield "custom", {"phase": "execute_token", "step_num": 1, "text": "thinking…"}
+            yield "custom", {"phase": "execute_tool_start", "step_num": 1, "name": "get_weather", "input": "{}"}
             yield "custom", {"phase": "execute_tool", "step_num": 1, "name": "get_weather", "result": "sunny"}
             yield "updates", {"execute": {"past_steps": [("s1", "done")]}}
             yield "custom", {"phase": "summarize_start"}
@@ -345,6 +368,9 @@ class TestChat:
 
         tools = [e for e in events if e.get("type") == "step_tool"]
         assert tools and tools[0]["name"] == "get_weather"
+
+        tool_starts = [e for e in events if e.get("type") == "step_tool_start"]
+        assert tool_starts and tool_starts[0]["name"] == "get_weather"
 
         texts = [e for e in events if e.get("type") == "text"]
         assert texts and texts[0]["content"] == "All set."

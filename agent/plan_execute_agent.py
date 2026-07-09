@@ -5,16 +5,26 @@
 """
 
 import asyncio
+from collections import defaultdict, deque
 import operator
+import re
+import uuid
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, model_validator
 
-from .harness import HarnessConfig, apply_llm_retry
+from .harness import (
+    BudgetExceededError,
+    HarnessConfig,
+    TaskBudgetExceededError,
+    TaskBudgetTracker,
+    apply_llm_retry,
+)
 from .llm import LLM
 from .log import get_logger
 from .react_agent import ReActAgent
@@ -23,8 +33,98 @@ from .skills import SkillRegistry, skills_overview
 logger = get_logger("plan_execute_agent")
 
 
+class _PlanToolEvents:
+    def __init__(self):
+        self.counter = 0
+        self.pending: dict[str, deque[str]] = defaultdict(deque)
+        self.seen_starts: set[str] = set()
+
+    def start(self, name: str, run_id=None) -> str | None:
+        key = str(run_id) if run_id else ""
+        if key and key in self.seen_starts:
+            return None
+        if key:
+            self.seen_starts.add(key)
+        self.counter += 1
+        tool_call_id = key or f"tool-{self.counter}-{uuid.uuid4().hex[:8]}"
+        self.pending[name].append(tool_call_id)
+        return tool_call_id
+
+    def finish(self, name: str, tool_call_id: str | None = None) -> str:
+        pending = self.pending.get(name)
+        if tool_call_id:
+            if pending:
+                try:
+                    pending.remove(tool_call_id)
+                except ValueError:
+                    pending.popleft()
+            return tool_call_id
+        if pending:
+            return pending.popleft()
+        self.counter += 1
+        return f"tool-{self.counter}-{uuid.uuid4().hex[:8]}"
+
+
+class _PlanToolStartCallback(BaseCallbackHandler):
+    """Emit a plan-task scoped custom event as soon as a tool starts."""
+
+    def __init__(self, writer, task_id: str, step_num: int, events: _PlanToolEvents):
+        self.writer = writer
+        self.task_id = task_id
+        self.step_num = step_num
+        self.events = events
+
+    def on_tool_start(self, serialized, input_str, **kwargs):  # type: ignore[override]
+        name = ""
+        if isinstance(serialized, dict):
+            name = serialized.get("name") or serialized.get("id") or ""
+        name = str(name or "tool")
+        tool_call_id = self.events.start(name, kwargs.get("run_id"))
+        if tool_call_id is None:
+            return
+        self.writer({
+            "phase": "execute_tool_start",
+            "task_id": self.task_id,
+            "step_num": self.step_num,
+            "tool_call_id": tool_call_id,
+            "name": name,
+            "input": str(input_str or "")[:500],
+        })
+
+
+def _extend_callbacks(base_callbacks, extra_callbacks: list[BaseCallbackHandler]):
+    """Append task-local callbacks without stripping LangGraph's callback manager."""
+    if base_callbacks is None:
+        return list(extra_callbacks)
+    if isinstance(base_callbacks, (list, tuple)):
+        return [*base_callbacks, *extra_callbacks]
+    if hasattr(base_callbacks, "copy") and hasattr(base_callbacks, "add_handler"):
+        callbacks = base_callbacks.copy()
+        for callback in extra_callbacks:
+            if callback not in callbacks.inheritable_handlers:
+                callbacks.inheritable_handlers.append(callback)
+        return callbacks
+    handlers = list(getattr(base_callbacks, "handlers", []) or [])
+    return [*handlers, *extra_callbacks]
+
+
+class _TaskSpec(BaseModel):
+    id: str
+    title: str
+    description: str
+    depends_on: list[str] = Field(default_factory=list)
+    parallelizable: bool = True
+    expected_output: str = ""
+
+
+def _task_id(raw: str, fallback: str) -> str:
+    value = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw.strip().lower()).strip("_")
+    return value or fallback
+
+
 class _PlannerOutput(BaseModel):
     steps: list[str] = Field(default_factory=list, description="Ordered steps to complete the task")
+    tasks: list[_TaskSpec] = Field(default_factory=list, description="Task DAG to complete the task")
 
     @model_validator(mode="before")
     @classmethod
@@ -34,22 +134,119 @@ class _PlannerOutput(BaseModel):
             data = {**data, "steps": data["plan"]}
         return data
 
+    @model_validator(mode="after")
+    def _normalize_tasks(self):
+        if self.tasks or not self.steps:
+            return self
+        tasks: list[_TaskSpec] = []
+        prior_ids: list[str] = []
+        used: set[str] = set()
+        for i, step in enumerate(self.steps, 1):
+            base_id = _task_id(step[:40], f"step_{i}")
+            task_id = base_id
+            suffix = 2
+            while task_id in used:
+                task_id = f"{base_id}_{suffix}"
+                suffix += 1
+            used.add(task_id)
+            tasks.append(_TaskSpec(
+                id=task_id,
+                title=step,
+                description=step,
+                depends_on=list(prior_ids),
+                parallelizable=False,
+            ))
+            prior_ids.append(task_id)
+        self.tasks = tasks
+        return self
+
 
 class PlanExecuteState(TypedDict):
     input: str
     plan: list[str]
     plan_total: int  # total steps in the current round's plan (set by plan_step, not accumulated)
+    tasks: list[dict]
+    task_results: dict[str, str]
+    task_errors: dict[str, str]
     past_steps: Annotated[list[tuple[str, str]], operator.add]
     response: str | None
 
 
 _PLANNER_SYSTEM = (
-    "Break the task into 3–5 broad, concrete steps. "
-    "Prefer fewer steps that group related sub-actions over many narrow steps. "
-    "Each step must be independently executable and meaningfully advance the task. "
+    "Break the task into a small DAG of 3–6 broad, concrete tasks. "
+    "Identify dependencies explicitly: tasks with no dependency may run in parallel; "
+    "tasks that need prior results must list those task ids in depends_on. "
+    "Prefer fewer tasks that group related sub-actions over many narrow tasks. "
+    "Do not create a final writing/synthesis task such as summarizing, compiling a report, "
+    "writing the final answer, or integrating the complete answer; a separate summarizer "
+    "will produce the final response after all tasks finish. "
     "Write each step in the same language as the user's task. "
-    'Respond in JSON: {{"steps": [<string>, ...]}}.'
+    'Respond in JSON: {{"tasks": ['
+    '{{"id": "<stable_ascii_id>", "title": "<short title>", '
+    '"description": "<concrete executable task>", "depends_on": ["<id>", ...], '
+    '"parallelizable": true, "expected_output": "<what this task should produce>"}}'
+    "]}}. "
+    'If a DAG is unnecessary, you may respond with {{"steps": [<string>, ...]}}.'
 )
+
+
+_FINAL_SYNTHESIS_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(整合|汇总|总结|撰写|形成|输出|生成).{0,8}(完整)?(答案|回答|结论|报告)",
+        r"(最终|最后).{0,8}(答案|回答|结论|报告)",
+        r"(完整答案|完整回答)",
+        r"\b(synthesize|summari[sz]e|compile|write|draft|craft)\b.{0,24}\b(final\s+)?(answer|response|report|conclusion)\b",
+        r"\b(final\s+)?(answer|response|report|conclusion)\b.{0,24}\b(synthesis|writeup|draft)\b",
+    )
+]
+
+
+def _is_final_synthesis_task(task: _TaskSpec) -> bool:
+    text = " ".join([
+        task.id,
+        task.title,
+        task.description,
+        task.expected_output,
+    ])
+    normalized = re.sub(r"[_-]+", " ", text).lower()
+    return any(pattern.search(normalized) for pattern in _FINAL_SYNTHESIS_PATTERNS)
+
+
+def _filter_final_synthesis_tasks(tasks: list[_TaskSpec]) -> list[_TaskSpec]:
+    if not tasks:
+        return []
+
+    removed = {task.id: list(task.depends_on) for task in tasks if _is_final_synthesis_task(task)}
+    if not removed:
+        return tasks
+
+    kept = [task for task in tasks if task.id not in removed]
+    if not kept:
+        return [tasks[0].model_copy(update={"depends_on": []})]
+
+    kept_ids = {task.id for task in kept}
+
+    def expand_dependency(dep: str, seen: set[str]) -> list[str]:
+        if dep in kept_ids:
+            return [dep]
+        if dep in seen or dep not in removed:
+            return []
+        seen.add(dep)
+        expanded: list[str] = []
+        for upstream in removed[dep]:
+            expanded.extend(expand_dependency(upstream, seen))
+        return expanded
+
+    filtered: list[_TaskSpec] = []
+    for task in kept:
+        deps: list[str] = []
+        for dep in task.depends_on:
+            for candidate in expand_dependency(dep, set()):
+                if candidate != task.id and candidate not in deps:
+                    deps.append(candidate)
+        filtered.append(task.model_copy(update={"depends_on": deps}))
+    return filtered
 
 
 def _planner_prompt(registry: SkillRegistry) -> ChatPromptTemplate:
@@ -89,6 +286,7 @@ class PlanExecuteAgent:
     ):
         self.llm = llm or LLM()
         cfg = harness or HarnessConfig.from_env()
+        self._harness = cfg
         # thinking=False is required for planner and summarizer:
         # structured-output (JSON mode) and thinking mode are mutually exclusive on
         # Qwen3 — with thinking on the model returns empty content, causing a parse error.
@@ -120,65 +318,314 @@ class PlanExecuteAgent:
             writer = get_stream_writer()
             writer({"phase": "planning_start"})
             result = await planner.ainvoke({"input": state["input"]})
-            logger.info("plan created: %d steps", len(result.steps))
-            logger.debug("plan steps: %s", result.steps)
-            return {"plan": result.steps, "plan_total": len(result.steps)}
+            planned_tasks = result.tasks
+            filtered_tasks = _filter_final_synthesis_tasks(planned_tasks)
+            if len(filtered_tasks) != len(planned_tasks):
+                logger.info(
+                    "filtered final synthesis tasks: %d -> %d",
+                    len(planned_tasks), len(filtered_tasks),
+                )
+            tasks = [task.model_dump() for task in filtered_tasks]
+            plan = [task.title for task in filtered_tasks]
+            logger.info("plan created: %d tasks", len(tasks))
+            logger.debug("plan tasks: %s", tasks)
+            return {
+                "plan": plan,
+                "plan_total": len(tasks),
+                "tasks": tasks,
+                "task_results": {},
+                "task_errors": {},
+            }
 
-        async def execute_step(state: PlanExecuteState, config):
+        async def execute_tasks(state: PlanExecuteState, config):
             writer = get_stream_writer()
-            task = state["plan"][0]
-            past = state.get("past_steps") or []
-            # Derive 1-based step number from plan position — never use len(past),
-            # because past_steps accumulates across rounds via operator.add.
-            total = state.get("plan_total") or len(state["plan"])
-            step_num = total - len(state["plan"]) + 1
-            logger.info("execute step [%d/%d]: %.80s", step_num, total, task)
-            writer({"phase": "execute_start", "step_num": step_num,
-                    "total": total, "task": task})
+            raw_tasks = state.get("tasks") or []
+            tasks = [_TaskSpec.model_validate(task) for task in raw_tasks]
+            total = len(tasks)
+            if not tasks:
+                return {"past_steps": [], "plan": [], "task_results": {}, "task_errors": {}}
 
-            context = "\n\n".join(f"Step: {s}\nResult: {r}" for s, r in past)
-            query = f"{task}\n\nContext from prior steps:\n{context}" if context else task
+            by_id = {task.id: task for task in tasks}
+            order = {task.id: i + 1 for i, task in enumerate(tasks)}
+            results: dict[str, str] = dict(state.get("task_results") or {})
+            errors: dict[str, str] = dict(state.get("task_errors") or {})
+            completed_steps: list[tuple[str, str]] = []
+            running: set[str] = set()
+            pending: set[str] = set(by_id) - set(results) - set(errors)
+            max_parallel = max(1, self._harness.max_parallel_tasks)
+            sem = asyncio.Semaphore(max_parallel)
 
-            # Stream inner ReAct executor's tokens/tool results out via writer so the
-            # client sees continuous progress instead of a 5–30s black box per step.
-            # Thinking tokens (Anthropic extended thinking / Qwen reasoning_content)
-            # are emitted as their own phase so the UI can show them live too —
-            # otherwise step_start → first text can sit silent for tens of seconds.
-            # Propagate the parent run's config into the inner executor so the
-            # harness guards set up by the caller (server.py / main.py) actually
-            # apply inside each step: the BudgetTracker callback (token / tool-call
-            # budget), the shared skill_call_counts cap (so e.g. build.py can't be
-            # called unbounded across steps), and recursion_limit. Without this the
-            # inner astream starts a fresh root run and silently drops all of them.
-            parts: list[str] = []
-            async for chunk, meta in executor.astream(
-                {"messages": [("human", query)]},
-                config=config,
-                stream_mode="messages",
-            ):
-                node = meta.get("langgraph_node")
-                if node == "agent" and isinstance(chunk, AIMessageChunk):
-                    for kind, text in LLM.iter_outputs(chunk):
-                        if kind == "thinking":
-                            writer({"phase": "execute_thinking", "step_num": step_num, "text": text})
-                        else:
-                            parts.append(text)
-                            writer({"phase": "execute_token", "step_num": step_num, "text": text})
-                elif node == "tools" and isinstance(chunk, ToolMessage):
-                    result = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                    writer({"phase": "execute_tool", "step_num": step_num,
-                            "name": chunk.name, "result": result[:800]})
+            def _dependency_context(task: _TaskSpec) -> str:
+                blocks = []
+                for dep in task.depends_on:
+                    if dep in results:
+                        dep_title = by_id.get(dep).title if dep in by_id else dep
+                        blocks.append(f"Task: {dep_title}\nResult: {results[dep]}")
+                return "\n\n".join(blocks)
 
-            answer = "".join(parts)
-            logger.debug("step result: %.200s", answer)
-            # Advance the plan deterministically — no LLM decides when to stop.
-            return {"past_steps": [(task, answer)], "plan": state["plan"][1:]}
+            async def run_one(task: _TaskSpec):
+                async with sem:
+                    step_num = order[task.id]
+                    logger.info("execute task [%d/%d] id=%s: %.80s",
+                                step_num, total, task.id, task.title)
+                    writer({
+                        "phase": "execute_start",
+                        "task_id": task.id,
+                        "step_num": step_num,
+                        "total": total,
+                        "task": task.title,
+                    })
+
+                    context = _dependency_context(task)
+                    query_parts = [task.description]
+                    if task.expected_output:
+                        query_parts.append(f"Expected output:\n{task.expected_output}")
+                    if context:
+                        query_parts.append(f"Dependency results:\n{context}")
+                    query = "\n\n".join(query_parts)
+
+                    base_config = config or {}
+                    configurable = dict(base_config.get("configurable") or {})
+                    configurable["plan_task_id"] = task.id
+                    tool_events = _PlanToolEvents()
+                    callbacks = _extend_callbacks(base_config.get("callbacks"), [
+                        TaskBudgetTracker(task.id, self._harness),
+                        _PlanToolStartCallback(writer, task.id, step_num, tool_events),
+                    ])
+                    task_config = {
+                        **base_config,
+                        "configurable": configurable,
+                        "callbacks": callbacks,
+                    }
+
+                    # Stream inner ReAct executor's tokens/tool results out via writer so the
+                    # client sees continuous progress instead of a 5–30s black box per step.
+                    # Propagate the parent run's config into the inner executor so the
+                    # harness guards set up by the caller (server.py / main.py) apply inside
+                    # each task, including shared token/tool budgets.
+                    parts: list[str] = []
+                    thinking_parts: list[str] = []
+                    fallback_answer = ""
+                    fallback_thinking = ""
+                    custom_stream_seen = False
+                    seen_tool_results: set[str] = set()
+
+                    def emit_tool_result(msg: ToolMessage):
+                        result = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        name = str(msg.name or "tool")
+                        raw_tool_call_id = getattr(msg, "tool_call_id", None)
+                        dedupe_key = (
+                            f"id:{raw_tool_call_id}"
+                            if raw_tool_call_id
+                            else f"name:{name}:result:{result}"
+                        )
+                        if dedupe_key in seen_tool_results:
+                            return
+                        seen_tool_results.add(dedupe_key)
+                        writer({
+                            "phase": "execute_tool",
+                            "task_id": task.id,
+                            "step_num": step_num,
+                            "tool_call_id": tool_events.finish(name, raw_tool_call_id),
+                            "name": name,
+                            "result": result[:800],
+                        })
+
+                    try:
+                        async for mode, payload in executor.astream(
+                            {"messages": [("human", query)]},
+                            config=task_config,
+                            stream_mode=["messages", "updates", "custom"],
+                        ):
+                            if mode == "custom":
+                                phase = payload.get("phase") if isinstance(payload, dict) else None
+                                text = payload.get("text") if isinstance(payload, dict) else None
+                                if phase == "agent_thinking" and text:
+                                    custom_stream_seen = True
+                                    thinking_parts.append(text)
+                                    writer({
+                                        "phase": "execute_thinking",
+                                        "task_id": task.id,
+                                        "step_num": step_num,
+                                        "text": text,
+                                    })
+                                elif phase == "agent_text" and text:
+                                    custom_stream_seen = True
+                                    parts.append(text)
+                                    writer({
+                                        "phase": "execute_token",
+                                        "task_id": task.id,
+                                        "step_num": step_num,
+                                        "text": text,
+                                    })
+                                continue
+                            if mode not in ("messages", "updates"):
+                                payload = (mode, payload)
+                                mode = "messages"
+                            if mode == "messages":
+                                chunk, meta = payload
+                                node = meta.get("langgraph_node")
+                                if node == "agent" and isinstance(chunk, AIMessageChunk):
+                                    if custom_stream_seen:
+                                        continue
+                                    for kind, text in LLM.iter_outputs(chunk):
+                                        if kind == "thinking":
+                                            thinking_parts.append(text)
+                                            writer({
+                                                "phase": "execute_thinking",
+                                                "task_id": task.id,
+                                                "step_num": step_num,
+                                                "text": text,
+                                            })
+                                        else:
+                                            parts.append(text)
+                                            writer({
+                                                "phase": "execute_token",
+                                                "task_id": task.id,
+                                                "step_num": step_num,
+                                                "text": text,
+                                            })
+                                elif node == "tools" and isinstance(chunk, ToolMessage):
+                                    emit_tool_result(chunk)
+                            elif mode == "updates":
+                                tool_update = payload.get("tools") if isinstance(payload, dict) else None
+                                tool_messages = tool_update.get("messages") if isinstance(tool_update, dict) else None
+                                if tool_messages:
+                                    for tool_msg in tool_messages:
+                                        if isinstance(tool_msg, ToolMessage):
+                                            emit_tool_result(tool_msg)
+                                    continue
+
+                                update = payload.get("agent") if isinstance(payload, dict) else None
+                                messages = update.get("messages") if isinstance(update, dict) else None
+                                if not messages:
+                                    continue
+                                msg = messages[-1]
+                                if not isinstance(msg, AIMessage) or getattr(msg, "tool_calls", None):
+                                    continue
+                                text_buf: list[str] = []
+                                thinking_buf: list[str] = []
+                                for kind, text in LLM.iter_outputs(msg):
+                                    if kind == "thinking":
+                                        thinking_buf.append(text)
+                                    else:
+                                        text_buf.append(text)
+                                if text_buf:
+                                    fallback_answer = "".join(text_buf)
+                                if thinking_buf:
+                                    fallback_thinking = "".join(thinking_buf)
+                    except (asyncio.CancelledError, BudgetExceededError):
+                        raise
+                    except TaskBudgetExceededError as exc:
+                        message = exc.message
+                        logger.info("task budget hit id=%s reason=%s", task.id, exc.reason)
+                        writer({
+                            "phase": "execute_failed",
+                            "task_id": task.id,
+                            "step_num": step_num,
+                            "error": message,
+                        })
+                        return task.id, None, message
+                    except Exception as exc:  # noqa: BLE001 — task-level failure is summarized.
+                        message = str(exc) or exc.__class__.__name__
+                        logger.exception("task failed id=%s", task.id)
+                        writer({
+                            "phase": "execute_failed",
+                            "task_id": task.id,
+                            "step_num": step_num,
+                            "error": message,
+                        })
+                        return task.id, None, message
+
+                    answer = "".join(parts)
+                    if not thinking_parts and fallback_thinking:
+                        writer({
+                            "phase": "execute_thinking",
+                            "task_id": task.id,
+                            "step_num": step_num,
+                            "text": fallback_thinking,
+                        })
+                    if not answer and fallback_answer:
+                        answer = fallback_answer
+                        writer({
+                            "phase": "execute_token",
+                            "task_id": task.id,
+                            "step_num": step_num,
+                            "text": fallback_answer,
+                        })
+                    logger.info(
+                        "task completed id=%s streamed_chars=%d fallback_chars=%d",
+                        task.id, len("".join(parts)), len(fallback_answer),
+                    )
+                    logger.debug("task result id=%s: %.200s", task.id, answer)
+                    writer({
+                        "phase": "execute_done",
+                        "task_id": task.id,
+                        "step_num": step_num,
+                    })
+                    return task.id, answer, None
+
+            while pending:
+                ready = [
+                    by_id[task_id]
+                    for task_id in sorted(pending, key=lambda x: order[x])
+                    if all(dep in results for dep in by_id[task_id].depends_on)
+                ]
+                if not ready:
+                    blocked = [
+                        task_id for task_id in sorted(pending, key=lambda x: order[x])
+                        if any(dep in errors for dep in by_id[task_id].depends_on)
+                    ]
+                    if not blocked:
+                        blocked = sorted(pending, key=lambda x: order[x])
+                    for task_id in blocked:
+                        missing = [
+                            dep for dep in by_id[task_id].depends_on
+                            if dep not in results
+                        ]
+                        message = f"blocked by unfinished dependencies: {', '.join(missing)}"
+                        errors[task_id] = message
+                        pending.remove(task_id)
+                        writer({
+                            "phase": "execute_failed",
+                            "task_id": task_id,
+                            "step_num": order[task_id],
+                            "error": message,
+                        })
+                    continue
+
+                serial = next((task for task in ready if not task.parallelizable), None)
+                if serial is not None:
+                    ready = [serial]
+
+                for task in ready:
+                    pending.remove(task.id)
+                    running.add(task.id)
+                finished = await asyncio.gather(*(run_one(task) for task in ready))
+                for task_id, answer, error in finished:
+                    running.discard(task_id)
+                    if error is not None:
+                        errors[task_id] = error
+                    else:
+                        results[task_id] = answer or ""
+                        completed_steps.append((by_id[task_id].title, answer or ""))
+
+            return {
+                "past_steps": completed_steps,
+                "plan": [],
+                "task_results": results,
+                "task_errors": errors,
+            }
 
         async def summarize_step(state: PlanExecuteState):
             writer = get_stream_writer()
             writer({"phase": "summarize_start"})
             logger.info("summarize: %d steps completed", len(state["past_steps"]))
             past_str = "\n".join(f"Step: {s}\nResult: {r}" for s, r in state["past_steps"])
+            errors = state.get("task_errors") or {}
+            if errors:
+                failures = "\n".join(f"Task {task_id}: {err}" for task_id, err in errors.items())
+                past_str = f"{past_str}\n\nFailed or blocked tasks:\n{failures}".strip()
 
             parts: list[str] = []
             async for chunk in summarizer.astream({"input": state["input"], "past_steps": past_str}):
@@ -192,16 +639,13 @@ class PlanExecuteAgent:
                         writer({"phase": "summarize_token", "text": text})
             return {"response": "".join(parts)}
 
-        def route_after_execute(state: PlanExecuteState) -> str:
-            return "summarize" if not state["plan"] else "execute"
-
         graph = StateGraph(PlanExecuteState)
         graph.add_node("plan", plan_step)
-        graph.add_node("execute", execute_step)
+        graph.add_node("execute", execute_tasks)
         graph.add_node("summarize", summarize_step)
         graph.add_edge(START, "plan")
         graph.add_edge("plan", "execute")
-        graph.add_conditional_edges("execute", route_after_execute)
+        graph.add_edge("execute", "summarize")
         graph.add_edge("summarize", END)
 
         return graph.compile(checkpointer=checkpointer)

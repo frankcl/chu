@@ -241,6 +241,28 @@ class TestRunSkillScript:
         out = run.invoke({"skill": "slow", "script": "sleep.py"})
         assert "timeout" in out
 
+    def test_script_cap_is_per_plan_task(self, tmp_path):
+        _, run = self._tools(tmp_path, "print('ok')")
+        counts = {}
+        cfg_a = {
+            "configurable": {
+                "skill_call_counts": counts,
+                "plan_task_id": "task-a",
+                "max_skill_script_calls_per_task": 1,
+            },
+        }
+        cfg_b = {
+            "configurable": {
+                "skill_call_counts": counts,
+                "plan_task_id": "task-b",
+                "max_skill_script_calls_per_task": 1,
+            },
+        }
+
+        assert "exit_code=0" in run.invoke({"skill": "runner", "script": "go.py"}, config=cfg_a)
+        assert "call cap reached" in run.invoke({"skill": "runner", "script": "go.py"}, config=cfg_a)
+        assert "exit_code=0" in run.invoke({"skill": "runner", "script": "go.py"}, config=cfg_b)
+
 
 # ── integration with ReActAgent ─────────────────────────────────────────────────
 

@@ -80,7 +80,7 @@ export async function respondHitl(sessionId, id, value) {
 
 /**
  * Stream a chat message.
- * callbacks: { onThinking, onText, onTool, onPlan, onStep, onReplan, onHitl, onDone, onError }
+ * callbacks: { onThinking, onText, onTool, onToolStart, onPlan, onStep, onReplan, onHitl, onDone, onError }
  * Returns an AbortController so the caller can cancel.
  */
 export function streamChat(sessionId, message, callbacks) {
@@ -137,6 +137,8 @@ export function streamChat(sessionId, message, callbacks) {
           switch (event.type) {
             case 'thinking':   callbacks.onThinking?.(event.content); break
             case 'text':       callbacks.onText?.(event.content); break
+            case 'heartbeat':  callbacks.onHeartbeat?.(); break
+            case 'tool_start': callbacks.onToolStart?.(event.name, event.input); break
             case 'tool':       callbacks.onTool?.(event.name, event.result); break
             case 'plan':       callbacks.onPlan?.(event.steps); break
             case 'step':       callbacks.onStep?.(event.step, event.result); break
@@ -145,7 +147,10 @@ export function streamChat(sessionId, message, callbacks) {
             case 'step_start': callbacks.onStepStart?.(event.step_num, event.total, event.task); break
             case 'step_token':    callbacks.onStepToken?.(event.step_num, event.text); break
             case 'step_thinking': callbacks.onStepThinking?.(event.step_num, event.text); break
-            case 'step_tool':     callbacks.onStepTool?.(event.step_num, event.name, event.result); break
+            case 'step_tool_start': callbacks.onStepToolStart?.(event.step_num, event.name, event.input, event.tool_call_id); break
+            case 'step_tool':     callbacks.onStepTool?.(event.step_num, event.name, event.result, event.tool_call_id); break
+            case 'step_done':     callbacks.onStepDone?.(event.step_num); break
+            case 'step_failed':   callbacks.onStepFailed?.(event.step_num, event.message); break
             case 'hitl':       callbacks.onHitl?.(event.id, event.prompt, event.options, event.preview); break
             case 'limit':      callbacks.onLimit?.(event.reason, event.message); break
             case 'done':       callbacks.onDone?.(); return

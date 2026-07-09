@@ -23,7 +23,7 @@
       >
         <template #description>
           <el-collapse
-            v-if="s.thinking && displaySettings.showThinking"
+            v-if="showThinkingBlock(s) && displaySettings.showThinking"
             :model-value="thinkActive(i)"
             @update:model-value="v => setThinkActive(i, v)"
             class="chu-cards chu-cards--think step-thinking"
@@ -35,13 +35,18 @@
                   <IconBulb v-else :size="13" :stroke="1.7" /> {{ thinkingLabel(i) }}
                 </span>
               </template>
-              <div class="markdown-body thinking-content" v-html="renderMarkdown(s.thinking)" />
+              <div v-if="s.thinking" class="markdown-body thinking-content" v-html="renderMarkdown(s.thinking)" />
             </el-collapse-item>
           </el-collapse>
           <div v-if="s.text" class="markdown-body step-text" v-html="renderMarkdown(s.text)" />
-          <div v-if="s.tools.length && displaySettings.showTools" class="step-tools">
-            <span v-for="(t, j) in s.tools" :key="j" class="tool-chip">
-              <IconTool :size="12" :stroke="1.7" /> {{ t.name }}
+          <div v-if="s.tools?.length && displaySettings.showTools" class="step-tools">
+            <span
+              v-for="(t, j) in s.tools"
+              :key="j"
+              class="tool-chip"
+              :class="`tool-chip--${t.status || 'success'}`"
+            >
+              <IconTool :size="12" :stroke="1.7" /> {{ t.name }}{{ toolStatusLabel(t) }}
             </span>
           </div>
         </template>
@@ -68,10 +73,12 @@ const props = defineProps({
 // Fall back to plan titles when stepStreams hasn't initialized yet
 const renderSteps = computed(() => {
   if (props.stepStreams.length) return props.stepStreams
-  return props.plan.map(task => ({ task, text: '', tools: [] }))
+  return props.plan.map(task => ({ task, text: '', thinking: '', tools: [], status: 'wait' }))
 })
 
 function stepStatus(i) {
+  const explicit = renderSteps.value[i]?.status
+  if (explicit && explicit !== 'wait') return explicit
   const oneBased = i + 1
   if (props.done) return 'success'
   if (props.activeStep > 0) {
@@ -92,11 +99,19 @@ function setThinkActive(i, v) {
 }
 
 function thinkingLabel(i) {
-  // While the step has no text yet, the model is still thinking; once text
-  // starts flowing the thinking phase has ended for this step.
   const s = renderSteps.value[i]
-  const inProgress = (i + 1 === props.activeStep) && !s.text
+  const inProgress = !!s?.thinkingActive
   return inProgress ? '思考中…' : '思考过程'
+}
+
+function showThinkingBlock(s) {
+  return !!(s?.thinking || s?.thinkingActive || s?.status === 'success' || s?.status === 'error')
+}
+
+function toolStatusLabel(t) {
+  if (t.status === 'running') return '（运行中）'
+  if (t.status === 'error') return '（失败）'
+  return '（完成）'
 }
 </script>
 
@@ -109,6 +124,27 @@ function thinkingLabel(i) {
   border-left: 3px solid var(--clay);
   border-radius: 14px;
   font-size: 13px;
+  max-width: 100%;
+  overflow-x: hidden;
+  overflow-y: visible;
+  padding-bottom: 18px;
+}
+.plan-view :deep(.el-steps) {
+  max-width: 100%;
+}
+.plan-view :deep(.el-step__main) {
+  min-width: 0;
+  max-width: 100%;
+}
+.plan-view :deep(.el-step__title) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.plan-view :deep(.el-step__description) {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .step-thinking {
   margin: 4px 0;
@@ -130,6 +166,12 @@ function thinkingLabel(i) {
   color: var(--el-text-color-regular);
   max-height: 240px;
   overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.thinking-empty {
+  font-size: 12px;
+  color: var(--ink-soft);
+  padding: 2px 0;
 }
 .plan-title {
   display: inline-flex;
@@ -161,6 +203,9 @@ function thinkingLabel(i) {
   font-size: 12px;
   color: var(--el-text-color-regular);
   margin-top: 4px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding-bottom: 4px;
 }
 .step-tools {
   display: flex;
@@ -172,11 +217,29 @@ function thinkingLabel(i) {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
   font-size: 11px;
   padding: 2px 9px;
   border-radius: 20px;
   background: var(--clay-tint);
   color: var(--clay-deep);
   border: 1px solid #ecd8cd;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.tool-chip--running {
+  background: #fff7e8;
+  color: #9a5b00;
+  border-color: #f0d49a;
+}
+.tool-chip--success {
+  background: #eef8f0;
+  color: #2f6b3f;
+  border-color: #cbe8d1;
+}
+.tool-chip--error {
+  background: #fff0f0;
+  color: #a63a3a;
+  border-color: #efc8c8;
 }
 </style>
