@@ -118,7 +118,7 @@ If it's ambiguous, ask one short clarifying question instead of building.
      as the design base. Only set this if such a file exists; otherwise the theme
      alone already gives a rich look.
 
-1.5. (Optional) Add imagery — but sparingly and within a hard budget.
+   (Optional) Add imagery — but sparingly and within a hard budget.
 
    A few well-chosen images make a deck vivid; an image on every slide makes it
    slow and noisy. Only illustrate the cover and 1–2 key content slides.

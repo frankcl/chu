@@ -32,10 +32,10 @@ from agent import (
     iter_chunk_outputs,
 )
 from agent import db
-from agent.log import get_logger, setup_logging
+from agent.source_meta import extract_source_favicons
+from logger import get_logger
 
 load_dotenv()
-setup_logging()  # idempotent — agent/__init__.py may have already called it
 logger = get_logger("server")
 
 # 对话历史持久化（MySQL）。未配置则禁用，历史相关 helper 优雅降级、不阻断对话。
@@ -627,7 +627,11 @@ class _TurnRecorder:
         elif t == "thinking":
             self.thinking += item.get("content", "")
         elif t == "tool":
-            self.tools.append({"name": item.get("name"), "result": item.get("result", "")})
+            self.tools.append({
+                "name": item.get("name"),
+                "result": item.get("result", ""),
+                "source_favicons": item.get("source_favicons") or [],
+            })
         elif t == "plan":
             self.plan = item.get("steps", [])
         elif t == "step_start":
@@ -638,7 +642,11 @@ class _TurnRecorder:
             self._step(item["step_num"])["thinking"] += item.get("text", "")
         elif t == "step_tool":
             self._step(item["step_num"])["tools"].append(
-                {"name": item.get("name"), "result": item.get("result", "")}
+                {
+                    "name": item.get("name"),
+                    "result": item.get("result", ""),
+                    "source_favicons": item.get("source_favicons") or [],
+                }
             )
 
     def rows(self) -> list[dict]:
@@ -648,7 +656,10 @@ class _TurnRecorder:
             rows.append({"role": "assistant", "type": "thinking", "content": self.thinking})
         for tl in self.tools:
             rows.append({"role": "assistant", "type": "tool",
-                         "content": tl["result"], "extra": {"name": tl["name"]}})
+                         "content": tl["result"], "extra": {
+                             "name": tl["name"],
+                             "source_favicons": tl.get("source_favicons") or [],
+                         }})
         if self.plan:
             rows.append({"role": "assistant", "type": "plan", "extra": {"steps": self.plan}})
         for num in sorted(self.steps):
@@ -719,7 +730,12 @@ async def chat(session_id: str, body: ChatRequest):
                     result = (
                         chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                     )
-                    await queue.put({"type": "tool", "name": chunk.name, "result": result[:800]})
+                    await queue.put({
+                        "type": "tool",
+                        "name": chunk.name,
+                        "result": result[:800],
+                        "source_favicons": extract_source_favicons(result),
+                    })
         finally:
             await queue.put(SENTINEL)
 
@@ -773,6 +789,7 @@ async def chat(session_id: str, body: ChatRequest):
                             "tool_call_id": data.get("tool_call_id"),
                             "name": data["name"],
                             "result": data["result"],
+                            "source_favicons": data.get("source_favicons") or [],
                         })
                     elif phase == "execute_tool_start":
                         await queue.put({

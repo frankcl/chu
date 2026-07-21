@@ -26,9 +26,10 @@ from .harness import (
     apply_llm_retry,
 )
 from .llm import LLM
-from .log import get_logger
+from logger import get_logger
 from .react_agent import ReActAgent
 from .skills import SkillRegistry, skills_overview
+from .source_meta import extract_source_favicons
 
 logger = get_logger("plan_execute_agent")
 
@@ -263,7 +264,9 @@ _SUMMARIZER_PROMPT = ChatPromptTemplate.from_messages([
         "system",
         "Based on the completed steps below, write a clear and concise final answer "
         "to the original task. Write the final answer in the same language as the "
-        "user's original task.",
+        "user's original task. When the completed steps include external sources or "
+        "URLs, cite them with Markdown footnotes in the answer body, such as [^1], "
+        "and list each source at the end as [^1]: [Page title](https://example.com/page).",
     ),
     (
         "human",
@@ -429,6 +432,7 @@ class PlanExecuteAgent:
                             "tool_call_id": tool_events.finish(name, raw_tool_call_id),
                             "name": name,
                             "result": result[:800],
+                            "source_favicons": extract_source_favicons(result),
                         })
 
                     try:

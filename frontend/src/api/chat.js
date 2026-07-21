@@ -139,7 +139,7 @@ export function streamChat(sessionId, message, callbacks) {
             case 'text':       callbacks.onText?.(event.content); break
             case 'heartbeat':  callbacks.onHeartbeat?.(); break
             case 'tool_start': callbacks.onToolStart?.(event.name, event.input); break
-            case 'tool':       callbacks.onTool?.(event.name, event.result); break
+            case 'tool':       callbacks.onTool?.(event.name, event.result, event.source_favicons); break
             case 'plan':       callbacks.onPlan?.(event.steps); break
             case 'step':       callbacks.onStep?.(event.step, event.result); break
             case 'replan':     callbacks.onReplan?.(event.steps); break
@@ -148,7 +148,7 @@ export function streamChat(sessionId, message, callbacks) {
             case 'step_token':    callbacks.onStepToken?.(event.step_num, event.text); break
             case 'step_thinking': callbacks.onStepThinking?.(event.step_num, event.text); break
             case 'step_tool_start': callbacks.onStepToolStart?.(event.step_num, event.name, event.input, event.tool_call_id); break
-            case 'step_tool':     callbacks.onStepTool?.(event.step_num, event.name, event.result, event.tool_call_id); break
+            case 'step_tool':     callbacks.onStepTool?.(event.step_num, event.name, event.result, event.tool_call_id, event.source_favicons); break
             case 'step_done':     callbacks.onStepDone?.(event.step_num); break
             case 'step_failed':   callbacks.onStepFailed?.(event.step_num, event.message); break
             case 'hitl':       callbacks.onHitl?.(event.id, event.prompt, event.options, event.preview); break

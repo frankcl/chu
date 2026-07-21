@@ -38,7 +38,6 @@
               <div v-if="s.thinking" class="markdown-body thinking-content" v-html="renderMarkdown(s.thinking)" />
             </el-collapse-item>
           </el-collapse>
-          <div v-if="s.text" class="markdown-body step-text" v-html="renderMarkdown(s.text)" />
           <div v-if="s.tools?.length && displaySettings.showTools" class="step-tools">
             <span
               v-for="(t, j) in s.tools"
@@ -49,6 +48,7 @@
               <IconTool :size="12" :stroke="1.7" /> {{ t.name }}{{ toolStatusLabel(t) }}
             </span>
           </div>
+          <div v-if="s.text" class="markdown-body step-text" v-html="renderStepText(s)" />
         </template>
       </el-step>
     </el-steps>
@@ -58,7 +58,7 @@
 <script setup>
 import { computed, reactive } from 'vue'
 import { IconClipboardList, IconPencil, IconListCheck, IconBulb, IconTool } from '@tabler/icons-vue'
-import { renderMarkdown } from '../utils/markdown.js'
+import { collectFaviconsFromToolResults, renderMarkdown } from '../utils/markdown.js'
 import { displaySettings } from '../composables/displaySettings.js'
 import chuThinking from '../assets/chu-thinking.svg'
 
@@ -112,6 +112,12 @@ function toolStatusLabel(t) {
   if (t.status === 'running') return '（运行中）'
   if (t.status === 'error') return '（失败）'
   return '（完成）'
+}
+
+function renderStepText(step) {
+  return renderMarkdown(step?.text, {
+    faviconsByUrl: collectFaviconsFromToolResults(step?.tools || []),
+  })
 }
 </script>
 

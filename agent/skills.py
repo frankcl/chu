@@ -17,7 +17,7 @@ import yaml
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, tool
 
-from .log import get_logger
+from logger import get_logger
 
 logger = get_logger("skills")
 

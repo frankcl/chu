@@ -1,9 +1,9 @@
-"""Centralized logging configuration for the agent application.
+"""Centralized logging configuration for the application.
 
-Usage:
-    from agent.log import get_logger, setup_logging
+Importing this module initializes logging once:
 
-    setup_logging()          # call once at entry point (idempotent)
+    from logger import get_logger
+
     logger = get_logger("my_module")
     logger.info("something happened")
 """
@@ -36,7 +36,7 @@ _NOISY_LOGGERS = (
 def setup_logging(level: str | None = None) -> None:
     """Configure root logger with console + rotating-file handlers.
 
-    Safe to call multiple times — only initializes once.
+    Safe to call multiple times - only initializes once.
     Log level precedence: argument > LOG_LEVEL env var > INFO.
     """
     global _initialized
@@ -50,12 +50,10 @@ def setup_logging(level: str | None = None) -> None:
 
     fmt = logging.Formatter(_FMT, datefmt=_DATE_FMT)
 
-    # ── Console handler ──────────────────────────────────────────────────────
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     root.addHandler(sh)
 
-    # ── Rotating file handler ────────────────────────────────────────────────
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     fh = logging.handlers.RotatingFileHandler(
@@ -67,11 +65,13 @@ def setup_logging(level: str | None = None) -> None:
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
-    # ── Silence noisy third-party loggers ────────────────────────────────────
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Return a logger with the given name (used as the module column)."""
+    """Return a logger with the given name."""
     return logging.getLogger(name)
+
+
+setup_logging()

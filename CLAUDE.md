@@ -42,7 +42,7 @@ The agent is built as three composable layers, each wrapping the one below. Modu
 
 3. **`plan_execute_agent.py` — `PlanExecuteAgent`**: planner → execute-loop → summarizer. The executor for each step is a `ReActAgent` (layer 3 reuses layer 2). The plan advances **deterministically** (`plan[1:]` each step, step number derived from plan position — never `len(past_steps)`, which accumulates across rounds via `operator.add`). Inner executor tokens/thinking/tool results are forwarded out via LangGraph's `get_stream_writer()` (`custom` stream mode) so the client sees live progress instead of a per-step black box.
 
-`agent/__init__.py` calls `setup_logging()` on import (before submodule imports, hence the deliberate E402s) and re-exports both the classes and backward-compatible `create_*` / `run_*` functions. The `create_agent` / `create_plan_execute_agent` functions return the **compiled graph**, not the wrapper class.
+`agent/__init__.py` re-exports both the classes and backward-compatible `create_*` / `run_*` functions. The `create_agent` / `create_plan_execute_agent` functions return the **compiled graph**, not the wrapper class.
 
 ### Harness (`agent/harness.py`)
 
@@ -75,6 +75,6 @@ Builtin tools (`agent/tools.py`): `python_repl`, `get_current_time`, `get_curren
 
 ## Conventions
 
-- Logging goes through `agent/log.py` (`get_logger`/`setup_logging`, idempotent); rotating file handler writes to `logs/app.log`. Use `get_logger("<module>")`, not the stdlib root logger.
+- Logging goes through the top-level `logger` package (`get_logger`/`setup_logging`, idempotent); importing `logger` initializes logging automatically, and the rotating file handler writes to `logs/app.log`. Use `get_logger("<module>")`, not the stdlib root logger.
 - When adding provider-specific code, remember the Qwen reasoning-content patch and the thinking-vs-structured-output exclusivity.
 - `generated/` and `logs/` are gitignored runtime output dirs.

@@ -1,7 +1,11 @@
 """Tests for agent/react_agent.py — extract_text_content, create_agent, run_agent."""
 
 from unittest.mock import MagicMock
-from agent.react_agent import extract_text_content, iter_chunk_outputs
+from agent.react_agent import (
+    _normalize_tool_call_arguments,
+    extract_text_content,
+    iter_chunk_outputs,
+)
 
 
 # ── iter_chunk_outputs ──────────────────────────────────────────────────────
@@ -91,6 +95,64 @@ class TestExtractTextContent:
         """Any non-list value should be coerced via str()."""
         assert extract_text_content(123) == "123"
         assert extract_text_content(None) == "None"
+
+
+# ── tool call argument normalization ─────────────────────────────────────────
+
+class TestToolCallArgumentNormalization:
+    def test_empty_raw_arguments_becomes_json_object(self):
+        from langchain_core.messages import AIMessage
+
+        msg = AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "web-research", "arguments": ""},
+                }]
+            },
+        )
+
+        out = _normalize_tool_call_arguments(msg)
+        args = out.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+        assert args == "{}"
+
+    def test_dict_raw_arguments_becomes_json_string(self):
+        from langchain_core.messages import AIMessage
+
+        msg = AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "run_skill_script", "arguments": {"skill": "web-research"}},
+                }]
+            },
+        )
+
+        out = _normalize_tool_call_arguments(msg)
+        args = out.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+        assert args == '{"skill": "web-research"}'
+
+    def test_valid_json_arguments_are_preserved(self):
+        from langchain_core.messages import AIMessage
+
+        msg = AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "run_skill_script", "arguments": '{"script":"search.py"}'},
+                }]
+            },
+        )
+
+        out = _normalize_tool_call_arguments(msg)
+        args = out.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+        assert args == '{"script":"search.py"}'
 
 
 # ── create_agent ──────────────────────────────────────────────────────────────

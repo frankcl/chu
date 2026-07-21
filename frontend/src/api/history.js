@@ -79,7 +79,11 @@ export function regroupMessages(rows) {
     const extra = m.extra || {}
     if (m.type === 'text') ai.content += m.content || ''
     else if (m.type === 'thinking') ai.thinking += m.content || ''
-    else if (m.type === 'tool') ai.tools.push({ name: extra.name, result: m.content || '' })
+    else if (m.type === 'tool') ai.tools.push({
+      name: extra.name,
+      result: m.content || '',
+      sourceFavicons: extra.source_favicons || [],
+    })
     else if (m.type === 'plan') {
       ai.plan = extra.steps || []
       ai.stepStreams = (extra.steps || []).map(task => ({ task, text: '', thinking: '', tools: [] }))

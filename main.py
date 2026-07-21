@@ -12,10 +12,9 @@ from agent import (
     extract_text_content,
 )
 from agent.harness import BudgetTracker, HarnessConfig
-from agent.log import get_logger, setup_logging
+from logger import get_logger
 
 load_dotenv()
-setup_logging()  # idempotent — ensures logging is configured for CLI runs too
 logger = get_logger("main")
 
 

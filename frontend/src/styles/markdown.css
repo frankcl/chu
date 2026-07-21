@@ -78,6 +78,153 @@
 }
 .markdown-body a:hover { text-decoration: underline; }
 
+.markdown-body .md-footnote-ref {
+  margin-left: 2px;
+  font-size: 0.78em;
+  line-height: 0;
+}
+.markdown-body .md-footnote-ref a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--line, #e6e2d8);
+  border-radius: 8px;
+  background: var(--surface-warm, #f6f4ee);
+  color: var(--clay-deep, #a44d2f);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.markdown-body .md-footnote-ref a:hover {
+  background: var(--clay-tint, #f3e6df);
+  text-decoration: none;
+}
+
+.markdown-body .md-references {
+  margin-top: 1em;
+  padding-top: 0.75em;
+  border-top: 1px solid var(--line, #e6e2d8);
+}
+.markdown-body .md-references-title {
+  margin-bottom: 0.45em;
+  color: var(--ink-soft, #6b6760);
+  font-size: 12px;
+  font-weight: 600;
+}
+.markdown-body .md-references-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 0;
+  margin: 0;
+  list-style: none;
+}
+.markdown-body .md-reference-item {
+  display: grid;
+  grid-template-columns: 20px 22px minmax(0, 1fr) 20px;
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft, #efece4);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.markdown-body .md-reference-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-warm, #f6f4ee);
+  color: var(--ink-soft, #6b6760);
+  font-size: 11px;
+  font-weight: 600;
+}
+.markdown-body .md-reference-icon,
+.markdown-body .md-reference-favicon,
+.markdown-body .md-reference-fallback {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+}
+.markdown-body .md-reference-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.markdown-body .md-reference-favicon {
+  position: absolute;
+  inset: 0;
+  object-fit: contain;
+  background: #fff;
+}
+.markdown-body .md-reference-fallback {
+  display: inline-flex;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line, #e6e2d8);
+  background: var(--surface-warm, #f6f4ee);
+}
+.markdown-body .md-reference-icon .md-reference-fallback {
+  display: none;
+}
+.markdown-body .md-reference-icon .md-reference-fallback:only-child {
+  display: inline-flex;
+}
+.markdown-body .md-reference-fallback::before,
+.markdown-body .md-reference-fallback::after {
+  content: '';
+  position: absolute;
+  border-color: var(--ink-faint, #9a9389);
+}
+.markdown-body .md-reference-fallback::before {
+  width: 11px;
+  height: 11px;
+  border: 1px solid var(--ink-faint, #9a9389);
+  border-radius: 50%;
+}
+.markdown-body .md-reference-fallback::after {
+  width: 13px;
+  height: 5px;
+  border-top: 1px solid var(--ink-faint, #9a9389);
+  border-bottom: 1px solid var(--ink-faint, #9a9389);
+}
+.markdown-body .md-reference-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  word-break: normal;
+}
+.markdown-body .md-reference-title {
+  color: var(--ink, #1f1e1d);
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+.markdown-body .md-reference-host {
+  overflow: hidden;
+  color: var(--ink-faint, #9a9389);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+.markdown-body .md-reference-back {
+  color: var(--ink-faint, #9a9389);
+  font-size: 13px;
+  text-align: center;
+}
+
 .markdown-body hr {
   border: none;
   border-top: 1px solid var(--el-border-color);

@@ -18,7 +18,7 @@ from typing import Callable
 
 from langchain_core.tools import BaseTool, StructuredTool
 
-from .log import get_logger
+from logger import get_logger
 
 logger = get_logger("hitl")
 

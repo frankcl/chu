@@ -36,7 +36,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from .log import get_logger
+from logger import get_logger
 
 logger = get_logger("db")
 
@@ -121,7 +121,6 @@ def init_db() -> bool:
     try:
         _engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600, future=True)
         Base.metadata.create_all(_engine)
-        _ensure_schema(_engine)
         _Session = sessionmaker(bind=_engine, future=True)
         logger.info("对话历史 MySQL 已就绪")
         return True
@@ -130,21 +129,6 @@ def init_db() -> bool:
         _engine = None
         _Session = None
         return False
-
-
-def _ensure_schema(engine) -> None:
-    """为既有表补齐后加的列（create_all 不会 ALTER 已存在的表）。best-effort。"""
-    try:
-        cols = {c["name"] for c in inspect(engine).get_columns("chat_session")}
-        if "top" not in cols:
-            with engine.begin() as conn:
-                conn.execute(text(
-                    "ALTER TABLE chat_session ADD COLUMN top TINYINT(1) NOT NULL DEFAULT 0"
-                ))
-            logger.info("chat_session 增加 top 列")
-    except Exception:
-        logger.exception("chat_session schema 迁移失败（top 列）")
-
 
 def enabled() -> bool:
     return _Session is not None

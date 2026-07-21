@@ -372,10 +372,11 @@ async function onSend(text) {
         msg.tools.push({ name, result, status: 'running' })
       }
     },
-    onTool:     (name, result) => {
+    onTool:     (name, result, sourceFavicons) => {
       const pendingIndex = msg.tools.findIndex(t => t.name === name && t.status === 'running')
       if (pendingIndex >= 0) {
         msg.tools[pendingIndex].result = result
+        msg.tools[pendingIndex].sourceFavicons = sourceFavicons || []
         msg.tools[pendingIndex].status = 'success'
         for (let i = msg.tools.length - 1; i > pendingIndex; i--) {
           if (msg.tools[i].name === name && msg.tools[i].status === 'running') {
@@ -383,7 +384,7 @@ async function onSend(text) {
           }
         }
       } else {
-        msg.tools.push({ name, result, status: 'success' })
+        msg.tools.push({ name, result, sourceFavicons: sourceFavicons || [], status: 'success' })
       }
     },
     onPlan:     steps => {
@@ -421,7 +422,7 @@ async function onSend(text) {
         msg.stepStreams[n - 1].thinkingActive = true
       }
     },
-    onStepTool: (n, name, result, toolCallId) => {
+    onStepTool: (n, name, result, toolCallId, sourceFavicons) => {
       const step = msg.stepStreams[n - 1]
       if (!step) return
       let pendingIndex = toolCallId
@@ -433,6 +434,7 @@ async function onSend(text) {
       if (pendingIndex >= 0) {
         if (toolCallId) step.tools[pendingIndex].id = toolCallId
         step.tools[pendingIndex].result = result
+        step.tools[pendingIndex].sourceFavicons = sourceFavicons || []
         step.tools[pendingIndex].status = 'success'
         for (let i = step.tools.length - 1; i > pendingIndex; i--) {
           if ((toolCallId && step.tools[i].id === toolCallId)
@@ -441,7 +443,7 @@ async function onSend(text) {
           }
         }
       } else {
-        step.tools.push({ id: toolCallId, name, result, status: 'success' })
+        step.tools.push({ id: toolCallId, name, result, sourceFavicons: sourceFavicons || [], status: 'success' })
       }
     },
     onStepToolStart: (n, name, input, toolCallId) => {

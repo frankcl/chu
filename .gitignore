@@ -14,3 +14,9 @@ generated/
 
 # frontend library
 node_modules/
+
+# log directory
+logs/
+
+# env config
+.env

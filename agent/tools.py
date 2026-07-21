@@ -7,7 +7,7 @@ from datetime import datetime
 
 from langchain_core.tools import BaseTool, tool
 
-from .log import get_logger
+from logger import get_logger
 
 logger = get_logger("tools")
 

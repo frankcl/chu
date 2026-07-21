@@ -1,25 +1,19 @@
-from .log import setup_logging
-
-setup_logging()  # initialize logging as soon as the agent package is imported
-
-# Imports follow setup_logging() so submodule loggers inherit the configured
-# handlers — the E402 ordering is deliberate.
-from .llm import LLM, extract_text_content, get_llm, iter_chunk_outputs  # noqa: E402
-from .react_agent import DEFAULT_SYSTEM, ReActAgent, create_agent, run_agent  # noqa: E402
-from .plan_execute_agent import (  # noqa: E402
+from .llm import LLM, extract_text_content, get_llm, iter_chunk_outputs
+from .react_agent import DEFAULT_SYSTEM, ReActAgent, create_agent, run_agent
+from .plan_execute_agent import (
     PlanExecuteAgent,
     create_plan_execute_agent,
     run_plan_execute_agent,
 )
-from .skills import Skill, SkillRegistry  # noqa: E402
-from .harness import (  # noqa: E402
+from .skills import Skill, SkillRegistry
+from .harness import (
     BudgetExceededError,
     BudgetTracker,
     HarnessConfig,
     TaskBudgetExceededError,
     TaskBudgetTracker,
 )
-from .hitl import ConsoleHitlChannel, HitlChannel  # noqa: E402
+from .hitl import ConsoleHitlChannel, HitlChannel
 
 __all__ = [
     # 三层类

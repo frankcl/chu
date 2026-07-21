@@ -111,7 +111,7 @@ import {
 } from '@tabler/icons-vue'
 import PlanView from './PlanView.vue'
 import HitlPrompt from './HitlPrompt.vue'
-import { renderMarkdown } from '../utils/markdown.js'
+import { collectFaviconsFromToolResults, renderMarkdown } from '../utils/markdown.js'
 import { displaySettings } from '../composables/displaySettings.js'
 import chuAvatar from '../assets/bot-avatar.png'
 import chuThinking from '../assets/chu-thinking.svg'
@@ -176,7 +176,7 @@ const thinkingInProgress = computed(() =>
 )
 
 const renderedContent = computed(() =>
-  props.msg.role === 'user' ? '' : renderMarkdown(props.msg.content)
+  props.msg.role === 'user' ? '' : renderMarkdown(props.msg.content, { faviconsByUrl: sourceFavicons.value })
 )
 const renderedThinking = computed(() => renderMarkdown(props.msg.thinking))
 const renderedTools = computed(() =>
@@ -185,6 +185,13 @@ const renderedTools = computed(() =>
     html: renderMarkdown(t.result),
   }))
 )
+const sourceFavicons = computed(() => {
+  const tools = [
+    ...(props.msg.tools || []),
+    ...((props.msg.stepStreams || []).flatMap(step => step.tools || [])),
+  ]
+  return collectFaviconsFromToolResults(tools)
+})
 
 // Detect generated .pptx decks in tool results and surface them as clickable
 // cards. A tool result wraps the script's stdout, so we scan for the embedded

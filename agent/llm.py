@@ -9,7 +9,7 @@ import os
 
 from langchain_core.language_models import BaseChatModel
 
-from .log import get_logger
+from logger import get_logger
 
 logger = get_logger("llm")
 

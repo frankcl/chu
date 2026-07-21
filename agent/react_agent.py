@@ -4,9 +4,10 @@
 agent 节点调用 LLM，tools 节点执行工具，循环至模型不再请求工具为止。
 """
 
-from typing import Annotated, TypedDict
+import json
+from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import BaseMessage, BaseMessageChunk, SystemMessage, message_chunk_to_message
+from langchain_core.messages import AIMessage, BaseMessage, BaseMessageChunk, SystemMessage, message_chunk_to_message
 from langchain_core.runnables import RunnableLambda
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -16,7 +17,7 @@ from langgraph.prebuilt import ToolNode
 from .harness import HarnessConfig, apply_llm_retry, wrap_tools
 from .hitl import HitlChannel, make_request_user_choice_tool
 from .llm import LLM
-from .log import get_logger
+from logger import get_logger
 from .skills import SkillRegistry, build_skill_tools, skills_overview
 from .tools import get_builtin_tools
 
@@ -29,12 +30,71 @@ DEFAULT_SYSTEM = (
     "Always think and reply in the same language as the user's latest message: "
     "your reasoning (thinking / reasoning) and your final answer must both use that "
     "language (e.g. a Chinese question → answer in Chinese; an English question → "
-    "answer in English), unless the user explicitly requests another language."
+    "answer in English), unless the user explicitly requests another language. "
+    "When your final answer relies on external sources or tool-returned URLs, cite "
+    "them with Markdown footnotes in the answer body, such as [^1], and list each "
+    "source at the end as [^1]: [Page title](https://example.com/page)."
 )
 
 
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _tool_call_args_by_id(message: AIMessage) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for tool_call in getattr(message, "tool_calls", []) or []:
+        if not isinstance(tool_call, dict):
+            continue
+        call_id = tool_call.get("id")
+        if call_id:
+            parsed[str(call_id)] = tool_call.get("args")
+    return parsed
+
+
+def _json_tool_arguments(raw: Any, parsed_args: Any = None) -> str:
+    if raw is None or raw == "":
+        if isinstance(parsed_args, dict):
+            return json.dumps(parsed_args, ensure_ascii=False)
+        return "{}"
+    if isinstance(raw, str):
+        try:
+            json.loads(raw)
+            return raw
+        except json.JSONDecodeError:
+            if isinstance(parsed_args, dict):
+                return json.dumps(parsed_args, ensure_ascii=False)
+            return "{}"
+    if isinstance(raw, dict):
+        return json.dumps(raw, ensure_ascii=False)
+    return json.dumps(raw, ensure_ascii=False)
+
+
+def _normalize_tool_call_arguments(message: BaseMessage) -> BaseMessage:
+    """Ensure raw OpenAI-compatible tool call arguments are JSON strings.
+
+    DashScope/Qwen may stream no-arg tool calls with an empty arguments string.
+    LangGraph then sends that raw assistant message back on the next turn, where
+    DashScope rejects the request because function.arguments is not JSON.
+    """
+    if not isinstance(message, AIMessage):
+        return message
+    raw_tool_calls = message.additional_kwargs.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return message
+    parsed_by_id = _tool_call_args_by_id(message)
+    for raw_call in raw_tool_calls:
+        if not isinstance(raw_call, dict):
+            continue
+        function = raw_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        call_id = raw_call.get("id")
+        function["arguments"] = _json_tool_arguments(
+            function.get("arguments"),
+            parsed_by_id.get(str(call_id)) if call_id is not None else None,
+        )
+    return message
 
 
 class ReActAgent:
@@ -73,6 +133,7 @@ class ReActAgent:
             logger.debug("agent node invoked, messages=%d", len(state["messages"]))
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
             response = bound.invoke(messages)
+            response = _normalize_tool_call_arguments(response)
             if response.tool_calls:
                 logger.debug("agent requested tools: %s", [tc["name"] for tc in response.tool_calls])
             return {"messages": [response]}
@@ -99,6 +160,7 @@ class ReActAgent:
                     response = await bound.ainvoke(messages)
                 else:
                     response = message_chunk_to_message(chunk)
+            response = _normalize_tool_call_arguments(response)
             if response.tool_calls:
                 logger.debug("agent requested tools: %s", [tc["name"] for tc in response.tool_calls])
             return {"messages": [response]}

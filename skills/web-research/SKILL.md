@@ -22,7 +22,8 @@ there is no separate search tool. Always search via the steps below.
    pass ALL queries in ONE call — the script searches them concurrently and
    returns them together. Do NOT make one call per query.
    `run_skill_script(skill="web-research", script="search.py", script_args=["<query 1>", "<query 2>", ...])`
-   It returns JSON `{"searches": [{query, results: [{title, url, content}]}]}`.
+   It returns JSON `{"searches": [{query, results: [{title, url, favicon, content}]}]}`.
+   `favicon` is optional metadata for the UI; do not include it in your answer text.
    At most 5 queries per call (extras are dropped and noted).
 3. Read the returned snippets. Prefer recent, authoritative sources.
 4. Write a concise summary (3–6 sentences) that directly answers the user's

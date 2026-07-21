@@ -4,7 +4,7 @@ Usage: python search.py "<query>" ["<query2>" ...]
 
 Accepts one OR MANY queries and runs them CONCURRENTLY (one process, one tool
 call). Prints JSON:
-    {"searches": [{"query": ..., "results": [{title, url, content}]}, ...]}
+    {"searches": [{"query": ..., "results": [{title, url, favicon, content}]}, ...]}
 
 Guards:
 - Queries are de-duplicated (order preserved).
@@ -28,7 +28,7 @@ def _search_one(query: str) -> dict:
     try:
         from langchain_tavily import TavilySearch
 
-        raw = TavilySearch(max_results=5).invoke({"query": query})
+        raw = TavilySearch(max_results=5, include_favicon=True).invoke({"query": query})
         results = raw.get("results", []) if isinstance(raw, dict) else raw
         out = []
         for r in results or []:
@@ -36,6 +36,7 @@ def _search_one(query: str) -> dict:
                 out.append({
                     "title": r.get("title"),
                     "url": r.get("url"),
+                    "favicon": r.get("favicon"),
                     "content": (r.get("content") or "")[:500],
                 })
         return {"query": query, "results": out}
