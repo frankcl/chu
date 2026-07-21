@@ -36,7 +36,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from .log import get_logger
+from logger import get_logger
 
 logger = get_logger("db")
 
