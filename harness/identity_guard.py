@@ -31,7 +31,8 @@ _PATTERNS = [
     r"(忽略|ignore).{0,20}(之前|previous|above).{0,20}(指令|instruction|prompt)",
     r"(api\s*key|secret|token|环境变量|env|\.env|配置|config|数据库地址|database url)",
     r"(部署|服务器|server|路径|path|endpoint|url).{0,20}(配置|地址|细节|detail)",
-    r"(工具链|内部工具|框架|framework|langgraph|checkpointer|模块|module|调用链)",
+    r"(你|你的|你们|chu|内部|隐藏).{0,20}(工具链|内部工具|框架|framework|langgraph|checkpointer|模块|module|调用链)",
+    r"(工具链|内部工具|框架|framework|langgraph|checkpointer|模块|module|调用链).{0,20}(你|你的|你们|chu|内部|隐藏)",
     r"(日志|log|trace|堆栈|stack trace|token 用量|token usage)",
     r"(其他用户|别的用户|其它用户|another user|other users).{0,20}(历史|会话|数据|账号|信息|history|data)",
 ]
