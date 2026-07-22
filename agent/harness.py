@@ -13,7 +13,6 @@ LangGraph at astream() time via config={"recursion_limit": ...}.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -23,6 +22,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 from logger import get_logger
+from utils.env_util import env_float, env_int, env_list
 
 logger = get_logger("harness")
 
@@ -48,35 +48,6 @@ class TaskBudgetExceededError(RuntimeError):
         self.message = message
 
 
-# ── config ──────────────────────────────────────────────────────────────────
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("env %s=%r is not an int, falling back to %d", name, raw, default)
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("env %s=%r is not a float, falling back to %s", name, raw, default)
-        return default
-
-
-def _env_list(name: str) -> list[str]:
-    raw = os.getenv(name, "")
-    return [x.strip() for x in raw.split(",") if x.strip()]
-
-
 @dataclass(frozen=True)
 class HarnessConfig:
     recursion_limit: int = 25
@@ -96,19 +67,19 @@ class HarnessConfig:
 
     @classmethod
     def from_env(cls) -> "HarnessConfig":
-        allow = _env_list("TOOL_ALLOWLIST")
+        allow = env_list("TOOL_ALLOWLIST")
         return cls(
-            recursion_limit=_env_int("RECURSION_LIMIT", 25),
-            idle_timeout=_env_float("IDLE_TIMEOUT_SECONDS", 60.0),
-            per_tool_timeout=_env_float("PER_TOOL_TIMEOUT_SECONDS", 30.0),
-            max_tool_calls=_env_int("MAX_TOOL_CALLS", 20),
-            max_tool_calls_per_task=_env_int("MAX_TOOL_CALLS_PER_TASK", 8),
-            max_skill_script_calls_per_task=_env_int("MAX_SKILL_SCRIPT_CALLS_PER_TASK", 3),
-            max_parallel_tasks=_env_int("MAX_PARALLEL_TASKS", 3),
-            max_tokens=_env_int("MAX_TOKENS_BUDGET", 200_000),
-            llm_max_retries=_env_int("LLM_MAX_RETRIES", 2),
+            recursion_limit=env_int("RECURSION_LIMIT", 25, logger),
+            idle_timeout=env_float("IDLE_TIMEOUT_SECONDS", 60.0, logger),
+            per_tool_timeout=env_float("PER_TOOL_TIMEOUT_SECONDS", 30.0, logger),
+            max_tool_calls=env_int("MAX_TOOL_CALLS", 20, logger),
+            max_tool_calls_per_task=env_int("MAX_TOOL_CALLS_PER_TASK", 8, logger),
+            max_skill_script_calls_per_task=env_int("MAX_SKILL_SCRIPT_CALLS_PER_TASK", 3, logger),
+            max_parallel_tasks=env_int("MAX_PARALLEL_TASKS", 3, logger),
+            max_tokens=env_int("MAX_TOKENS_BUDGET", 200_000, logger),
+            llm_max_retries=env_int("LLM_MAX_RETRIES", 2, logger),
             tool_allowlist=allow or None,
-            tool_denylist=_env_list("TOOL_DENYLIST"),
+            tool_denylist=env_list("TOOL_DENYLIST"),
         )
 
     def merge(self, overrides: dict[str, Any]) -> "HarnessConfig":

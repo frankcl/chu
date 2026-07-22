@@ -64,7 +64,11 @@ async function loadUser() {
 // 历史项的 messages 懒加载：切到该会话时再拉取 + 重建运行时记忆。
 async function loadConversations() {
   try {
-    const convs = await listConversations()
+    const now = Date.now()
+    const convs = await listConversations({
+      startTime: now - 30 * 86400000,
+      endTime: now,
+    })
     sessions.value = convs.map(c => ({
       id: c.id,          // = 后端 conversation/session id（= thread_id）
       sessionId: null,   // 运行时 session 尚未创建；切换时再建并绑定

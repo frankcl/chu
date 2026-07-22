@@ -31,8 +31,8 @@ from agent import (
     create_plan_execute_agent,
     iter_chunk_outputs,
 )
-from agent import db
 from agent.source_meta import extract_source_favicons
+import storage as db
 from logger import get_logger
 
 load_dotenv()
@@ -483,12 +483,12 @@ class TopUpdate(BaseModel):
 
 
 @app.get("/api/conversations")
-def list_conversations():
+def list_conversations(start_time: int | None = None, end_time: int | None = None):
     """当前用户的对话历史列表（按 update_time 倒序）。"""
     user_id = _current_user_id()
     if user_id is None:
         raise HTTPException(status_code=401, detail="未登录")
-    return {"conversations": db.list_conversations(user_id)}
+    return {"conversations": db.list_conversations(user_id, start_time=start_time, end_time=end_time)}
 
 
 @app.get("/api/conversations/{conversation_id}")

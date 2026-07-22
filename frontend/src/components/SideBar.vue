@@ -101,25 +101,28 @@ const props = defineProps({
 })
 const emit = defineEmits(['new-chat', 'switch', 'delete', 'toggle-top', 'login', 'logout', 'clear-all', 'open-settings'])
 
-// 历史对话分组：置顶优先，其余按最后活跃时间落入 最近7天 / 最近30天 / 大于30天；组内时间倒序。
+// 历史对话分组：置顶单独展示，其余按最后活跃时间落入 今天 / 最近1周 / 最近30天。
 const groups = computed(() => {
   const DAY = 86400000
   const now = Date.now()
-  const pinned = [], d7 = [], d30 = [], older = []
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  const pinned = [], today = [], week = [], month = []
   for (const s of props.sessions) {
     if (s.top) { pinned.push(s); continue }
-    const age = now - (s.updateTime || now)
-    if (age <= 7 * DAY) d7.push(s)
-    else if (age <= 30 * DAY) d30.push(s)
-    else older.push(s)
+    const updateTime = s.updateTime || now
+    const age = now - updateTime
+    if (updateTime >= todayStart.getTime()) today.push(s)
+    else if (age <= 7 * DAY) week.push(s)
+    else if (age <= 30 * DAY) month.push(s)
   }
   const byTimeDesc = (a, b) => (b.updateTime || 0) - (a.updateTime || 0)
-  for (const arr of [pinned, d7, d30, older]) arr.sort(byTimeDesc)
+  for (const arr of [pinned, today, week, month]) arr.sort(byTimeDesc)
   return [
     { key: 'top', label: '置顶', items: pinned },
-    { key: 'd7', label: '最近 7 天', items: d7 },
-    { key: 'd30', label: '最近 30 天', items: d30 },
-    { key: 'older', label: '大于 30 天', items: older },
+    { key: 'today', label: '今天', items: today },
+    { key: 'week', label: '最近1周', items: week },
+    { key: 'month', label: '最近30天', items: month },
   ].filter(g => g.items.length)
 })
 </script>

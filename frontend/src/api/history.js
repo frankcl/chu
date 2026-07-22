@@ -6,8 +6,13 @@ import { fetchWithAuth } from './chat.js'
 import { formatDateTime } from '../utils/datetime.js'
 
 /** 当前用户的对话列表（按 update_time 倒序）：[{ id, title, update_time }]。 */
-export async function listConversations() {
-  const res = await fetchWithAuth(headers => fetch('/api/conversations', { headers }))
+export async function listConversations({ startTime, endTime } = {}) {
+  const params = new URLSearchParams()
+  if (startTime != null) params.set('start_time', String(startTime))
+  if (endTime != null) params.set('end_time', String(endTime))
+  const qs = params.toString()
+  const url = qs ? `/api/conversations?${qs}` : '/api/conversations'
+  const res = await fetchWithAuth(headers => fetch(url, { headers }))
   if (!res.ok) throw new Error(`加载历史失败: ${res.status}`)
   return (await res.json()).conversations
 }

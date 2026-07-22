@@ -190,6 +190,25 @@ class TestDeleteSession:
         assert resp.status_code == 404
 
 
+class TestConversationHistory:
+    def test_list_conversations_passes_time_range(self, client):
+        import server
+
+        with (
+            patch("server._current_user_id", return_value="userA"),
+            patch.object(server.db, "list_conversations", return_value=[
+                {"id": "c1", "title": "t", "update_time": 2000, "top": False}
+            ]) as list_conversations,
+        ):
+            resp = client.get("/api/conversations?start_time=1000&end_time=2000")
+
+        assert resp.status_code == 200
+        assert resp.json()["conversations"] == [
+            {"id": "c1", "title": "t", "update_time": 2000, "top": False}
+        ]
+        list_conversations.assert_called_once_with("userA", start_time=1000, end_time=2000)
+
+
 # ── POST /api/chat/{session_id} ───────────────────────────────────────────────
 
 class TestChat:

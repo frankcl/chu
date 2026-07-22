@@ -30,7 +30,7 @@ os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING_V2"] = "false"
 
-# 测试环境强制禁用真实数据库：清空 MySQL 配置，使 db._build_url() 返回 None，
+# 测试环境强制禁用真实数据库：清空 MySQL 配置，使 storage.db._build_url() 返回 None，
 # init_db() 优雅降级（不连库、不建表/ALTER、所有读写 no-op）。防止 import server
 # 时连上 .env 里的真实 MySQL 造成污染。用赋值（非 setdefault）确保盖过 .env，
 # 且 load_dotenv() 默认 override=False 不会回写。需要落库的用例用 db_rollback
@@ -55,7 +55,7 @@ def _no_real_db():
     若将来有人改坏隔离（例如重新配置了真实库），这里 fail-fast，避免污染生产库。
     需要落库的用例请用 db_rollback fixture。
     """
-    from agent import db
+    import storage as db
     assert not db.enabled(), (
         "测试不得连接真实数据库：init_db 应因空 MySQL 配置而禁用。"
         "如需落库请用 db_rollback fixture。"
@@ -90,13 +90,13 @@ def _clear_server_sessions_after_test():
 # ---------------------------------------------------------------------------
 # DB tests: transaction-rollback isolation.
 #
-# Every agent.db helper commits internally (`with _Session() as s, s.begin()`).
+# Every storage helper commits internally (`with _Session() as s, s.begin()`).
 # To keep DB testcases from persisting anything, we bind the db module to an
 # in-memory SQLite connection wrapped in a single outer transaction, and use
 # join_transaction_mode="create_savepoint" so each helper's commit only
 # releases a SAVEPOINT. At teardown one rollback() discards the whole test's
 # writes — nothing is ever committed. Use via the `db_rollback` arg; it yields
-# the patched `agent.db` module.
+# the patched storage module.
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def db_rollback():
@@ -104,7 +104,8 @@ def db_rollback():
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
 
-    from agent import db
+    import storage as storage_api
+    import storage.db as db
 
     engine = create_engine(
         "sqlite://",
@@ -131,7 +132,7 @@ def db_rollback():
     saved_engine, saved_session = db._engine, db._Session
     db._engine, db._Session = engine, TestSession
     try:
-        yield db
+        yield storage_api
     finally:
         db._engine, db._Session = saved_engine, saved_session
         if outer.is_active:

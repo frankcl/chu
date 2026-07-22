@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, tool
 
 from logger import get_logger
+from utils.env_util import env_int
 
 logger = get_logger("skills")
 
@@ -53,18 +54,7 @@ def _script_call_cap(skill: str, script: str) -> int:
     key = f"{skill}/{script}"
     if key in overrides:
         return overrides[key]
-    return _env_int("MAX_SKILL_SCRIPT_CALLS", _MAX_SKILL_SCRIPT_CALLS_DEFAULT)
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("env %s=%r is not an int, using %d", name, raw, default)
-        return default
+    return env_int("MAX_SKILL_SCRIPT_CALLS", _MAX_SKILL_SCRIPT_CALLS_DEFAULT, logger)
 # 模型工具名约束（OpenAI / Anthropic 通用）：字母数字、下划线、连字符，长度 1–64。
 _VALID_TOOL_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
