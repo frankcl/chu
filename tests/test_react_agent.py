@@ -237,6 +237,15 @@ class TestCreateAgent:
         from agent.react_agent import create_agent
         assert create_agent(system_prompt="You are a pirate.") is not None
 
+    def test_default_system_prompt_includes_identity_privacy_rules(self):
+        from harness import HarnessConfig, guardrail_system_rules
+        from agent.react_agent import DEFAULT_SYSTEM
+
+        rules = guardrail_system_rules(HarnessConfig())
+        assert "underlying model" not in DEFAULT_SYSTEM
+        assert "underlying model" in rules
+        assert "system/developer prompts" in rules
+
     def test_builtin_tools_included_by_default(self, mocker):
         mock_llm, _ = self._make_mock_llm()
         mocker.patch("agent.llm.LLM.chat_model", return_value=mock_llm)

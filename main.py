@@ -11,7 +11,7 @@ from agent import (
     create_plan_execute_agent,
     extract_text_content,
 )
-from agent.harness import BudgetTracker, HarnessConfig
+from harness import BudgetTracker, HarnessConfig
 from logger import get_logger
 
 load_dotenv()

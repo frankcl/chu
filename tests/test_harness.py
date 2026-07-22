@@ -1,4 +1,4 @@
-"""Tests for the harness control layer (agent/harness.py + server cancel endpoint)."""
+"""Tests for the harness control layer (harness package + server cancel endpoint)."""
 
 import asyncio
 import time
@@ -9,7 +9,7 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 
-from agent.harness import (
+from harness import (
     BudgetExceededError,
     BudgetTracker,
     HarnessConfig,
@@ -28,7 +28,8 @@ class TestHarnessConfigFromEnv:
             "RECURSION_LIMIT", "IDLE_TIMEOUT_SECONDS", "PER_TOOL_TIMEOUT_SECONDS",
             "MAX_TOOL_CALLS", "MAX_TOOL_CALLS_PER_TASK",
             "MAX_SKILL_SCRIPT_CALLS_PER_TASK", "MAX_TOKENS_BUDGET", "LLM_MAX_RETRIES",
-            "TOOL_ALLOWLIST", "TOOL_DENYLIST",
+            "TOOL_ALLOWLIST", "TOOL_DENYLIST", "ENABLED_GUARDRAILS",
+            "SENSITIVE_OUTPUT_SCAN", "SENSITIVE_OUTPUT_ACTION",
         ):
             monkeypatch.delenv(key, raising=False)
         cfg = HarnessConfig.from_env()
@@ -42,6 +43,9 @@ class TestHarnessConfigFromEnv:
         assert cfg.llm_max_retries == 2
         assert cfg.tool_allowlist is None
         assert cfg.tool_denylist == []
+        assert cfg.enabled_guardrails == ["identity_privacy", "safety"]
+        assert cfg.sensitive_output_scan is True
+        assert cfg.sensitive_output_action == "redact"
 
     def test_reads_env(self, monkeypatch):
         monkeypatch.setenv("RECURSION_LIMIT", "7")
@@ -51,6 +55,9 @@ class TestHarnessConfigFromEnv:
         monkeypatch.setenv("MAX_SKILL_SCRIPT_CALLS_PER_TASK", "2")
         monkeypatch.setenv("TOOL_DENYLIST", "python_repl, write_file")
         monkeypatch.setenv("TOOL_ALLOWLIST", "")
+        monkeypatch.setenv("ENABLED_GUARDRAILS", "identity_privacy")
+        monkeypatch.setenv("SENSITIVE_OUTPUT_SCAN", "false")
+        monkeypatch.setenv("SENSITIVE_OUTPUT_ACTION", "block")
         cfg = HarnessConfig.from_env()
         assert cfg.recursion_limit == 7
         assert cfg.idle_timeout == 12.5
@@ -59,6 +66,13 @@ class TestHarnessConfigFromEnv:
         assert cfg.max_skill_script_calls_per_task == 2
         assert cfg.tool_denylist == ["python_repl", "write_file"]
         assert cfg.tool_allowlist is None  # empty string → None (allow all)
+        assert cfg.enabled_guardrails == ["identity_privacy"]
+        assert cfg.sensitive_output_scan is False
+        assert cfg.sensitive_output_action == "block"
+
+    def test_invalid_sensitive_output_action_falls_back_to_redact(self):
+        cfg = HarnessConfig(sensitive_output_action="unknown")
+        assert cfg.sensitive_output_action == "redact"
 
     def test_garbage_env_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv("RECURSION_LIMIT", "not-a-number")

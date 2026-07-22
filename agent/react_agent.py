@@ -14,9 +14,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .harness import HarnessConfig, apply_llm_retry, wrap_tools
 from .hitl import HitlChannel, make_request_user_choice_tool
 from .llm import LLM
+from harness import HarnessConfig, apply_llm_retry, guardrail_system_rules, wrap_tools
 from logger import get_logger
 from .skills import SkillRegistry, build_skill_tools, skills_overview
 from .tools import get_builtin_tools
@@ -116,6 +116,9 @@ class ReActAgent:
         # 无 skills 目录时注册表为空 → 工具与系统提示均不变（行为零回归）。
         registry = SkillRegistry.resolve(skills)
         skill_tools = build_skill_tools(registry, cfg.per_tool_timeout)
+        rules = guardrail_system_rules(cfg)
+        if rules and rules not in system_prompt:
+            system_prompt = system_prompt + "\n\n" + rules
         if not registry.is_empty():
             system_prompt = system_prompt + "\n\n" + skills_overview(registry)
         tools = wrap_tools(get_builtin_tools() + skill_tools + (extra_tools or []), cfg)

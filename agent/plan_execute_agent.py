@@ -18,12 +18,13 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, model_validator
 
-from .harness import (
+from harness import (
     BudgetExceededError,
     HarnessConfig,
     TaskBudgetExceededError,
     TaskBudgetTracker,
     apply_llm_retry,
+    guardrail_system_rules,
 )
 from .llm import LLM
 from logger import get_logger
@@ -250,29 +251,36 @@ def _filter_final_synthesis_tasks(tasks: list[_TaskSpec]) -> list[_TaskSpec]:
     return filtered
 
 
-def _planner_prompt(registry: SkillRegistry) -> ChatPromptTemplate:
+def _planner_prompt(registry: SkillRegistry, cfg: HarnessConfig) -> ChatPromptTemplate:
     """Planner prompt；当存在 skill 时把概览追加进 system 消息，使规划感知 skill。"""
     system = _PLANNER_SYSTEM
+    rules = guardrail_system_rules(cfg)
+    if rules:
+        system = system + "\n\n" + rules
     if not registry.is_empty():
         overview = skills_overview(registry).replace("{", "{{").replace("}", "}}")
         system = system + "\n\n" + overview
     return ChatPromptTemplate.from_messages([("system", system), ("human", "{input}")])
 
 
-_SUMMARIZER_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "Based on the completed steps below, write a clear and concise final answer "
-        "to the original task. Write the final answer in the same language as the "
-        "user's original task. When the completed steps include external sources or "
-        "URLs, cite them with Markdown footnotes in the answer body, such as [^1], "
-        "and list each source at the end as [^1]: [Page title](https://example.com/page).",
-    ),
-    (
-        "human",
-        "Task: {input}\n\nCompleted steps:\n{past_steps}",
-    ),
-])
+_SUMMARIZER_SYSTEM = (
+    "Based on the completed steps below, write a clear and concise final answer "
+    "to the original task. Write the final answer in the same language as the "
+    "user's original task. When the completed steps include external sources or "
+    "URLs, cite them with Markdown footnotes in the answer body, such as [^1], "
+    "and list each source at the end as [^1]: [Page title](https://example.com/page)."
+)
+
+
+def _summarizer_prompt(cfg: HarnessConfig) -> ChatPromptTemplate:
+    system = _SUMMARIZER_SYSTEM
+    rules = guardrail_system_rules(cfg)
+    if rules:
+        system = system + "\n\n" + rules
+    return ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "Task: {input}\n\nCompleted steps:\n{past_steps}"),
+    ])
 
 
 class PlanExecuteAgent:
@@ -305,10 +313,10 @@ class PlanExecuteAgent:
         ).compiled
         # with_structured_output / retry order matters: bind/configure on the raw
         # BaseChatModel first, then wrap the resulting Runnable with retry.
-        self._planner = _planner_prompt(registry) | apply_llm_retry(
+        self._planner = _planner_prompt(registry, cfg) | apply_llm_retry(
             base_no_think.with_structured_output(_PlannerOutput), cfg,
         )
-        self._summarizer = _SUMMARIZER_PROMPT | apply_llm_retry(base_no_think, cfg)
+        self._summarizer = _summarizer_prompt(cfg) | apply_llm_retry(base_no_think, cfg)
 
         self.compiled = self._build_graph(checkpointer)
 

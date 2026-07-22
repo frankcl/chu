@@ -23,15 +23,19 @@ from pydantic import BaseModel
 
 from agent import (
     LLM,
-    BudgetExceededError,
-    BudgetTracker,
-    HarnessConfig,
     HitlChannel,
     create_agent,
     create_plan_execute_agent,
     iter_chunk_outputs,
 )
 from agent.source_meta import extract_source_favicons
+from harness import (
+    BudgetExceededError,
+    BudgetTracker,
+    HarnessConfig,
+    evaluate_input_guardrails,
+    guard_output_item,
+)
 import storage as db
 from logger import get_logger
 
@@ -287,6 +291,9 @@ class SessionRequest(BaseModel):
     llm_max_retries: int | None = None
     tool_allowlist: list[str] | None = None
     tool_denylist: list[str] | None = None
+    enabled_guardrails: list[str] | None = None
+    sensitive_output_scan: bool | None = None
+    sensitive_output_action: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -712,6 +719,37 @@ async def chat(session_id: str, body: ChatRequest):
     persist = db.enabled() and user_id is not None
     recorder = _TurnRecorder()
 
+    guardrail_decision = evaluate_input_guardrails(body.message, harness)
+    if guardrail_decision.blocked:
+        answer = guardrail_decision.response or ""
+        guarded_item, _ = guard_output_item({"type": "text", "content": answer}, harness)
+
+        async def guarded_stream():
+            if persist:
+                await run_in_threadpool(
+                    db.create_conversation, session_id, user_id, body.message[:24]
+                )
+                await run_in_threadpool(
+                    db.append_messages, session_id, user_id,
+                    [{"role": "user", "type": "text", "content": body.message}],
+                )
+                await run_in_threadpool(
+                    db.append_messages, session_id, user_id,
+                    [{"role": "assistant", "type": "text", "content": guarded_item.get("content", "")}],
+                )
+            yield _sse(guarded_item)
+            yield _sse({"type": "done"})
+
+        return StreamingResponse(
+            guarded_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     async def produce_react():
         try:
             async for chunk, metadata in agent.astream(
@@ -868,33 +906,44 @@ async def chat(session_id: str, body: ChatRequest):
                     continue
                 if item is SENTINEL:
                     break
-                recorder.observe(item)  # 累积 AI 产出用于落库
-                yield _sse(item)
+                guarded_item, blocked_reason = guard_output_item(item, harness)
+                if blocked_reason:
+                    logger.info("stream sensitive output blocked session=%s reason=%s", session_id, blocked_reason)
+                    yield _sse(guarded_item)
+                    yield _sse({"type": "done"})
+                    return
+                recorder.observe(guarded_item)  # 累积 AI 产出用于落库
+                yield _sse(guarded_item)
 
             # SENTINEL received — surface producer outcome
             try:
                 await producer
             except asyncio.CancelledError:
                 logger.info("stream cancelled session=%s", session_id)
-                yield _sse({"type": "limit", "reason": "cancelled",
-                            "message": "cancelled by client"})
+                item, _ = guard_output_item(
+                    {"type": "limit", "reason": "cancelled", "message": "cancelled by client"},
+                    harness,
+                )
+                yield _sse(item)
                 yield _sse({"type": "done"})
                 return
             except BudgetExceededError as exc:
                 logger.info("stream budget hit session=%s reason=%s",
                             session_id, exc.reason)
-                yield _sse({"type": "limit", "reason": exc.reason, "message": exc.message})
+                item, _ = guard_output_item({"type": "limit", "reason": exc.reason, "message": exc.message}, harness)
+                yield _sse(item)
                 yield _sse({"type": "done"})
                 return
             except GraphRecursionError as exc:
                 logger.info("stream recursion limit session=%s", session_id)
-                yield _sse({"type": "limit", "reason": "recursion", "message": str(exc)})
+                item, _ = guard_output_item({"type": "limit", "reason": "recursion", "message": str(exc)}, harness)
+                yield _sse(item)
                 yield _sse({"type": "done"})
                 return
             except Exception as exc:
                 if _is_content_moderation_error(exc):
                     logger.info("stream content moderation block session=%s", session_id)
-                    yield _sse({
+                    item, _ = guard_output_item({
                         "type": "limit",
                         "reason": "content_filter",
                         "message": (
@@ -902,11 +951,15 @@ async def chat(session_id: str, body: ChatRequest):
                             "（通义千问/DashScope）在合规框架下施加，常见于政治/地缘、"
                             "金融投资建议（如股市预测）等敏感话题；请换个问法或更换话题。"
                         ),
-                    })
+                    }, harness)
+                    yield _sse(item)
                     yield _sse({"type": "done"})
                     return
                 logger.error("stream error session=%s: %s", session_id, exc, exc_info=exc)
-                yield _sse({"type": "error", "message": str(exc)})
+                item, blocked_reason = guard_output_item({"type": "error", "message": str(exc)}, harness)
+                yield _sse(item)
+                if blocked_reason:
+                    yield _sse({"type": "done"})
                 return
 
             elapsed = time.monotonic() - t0

@@ -6,7 +6,7 @@ from .plan_execute_agent import (
     run_plan_execute_agent,
 )
 from .skills import Skill, SkillRegistry
-from .harness import (
+from harness import (
     BudgetExceededError,
     BudgetTracker,
     HarnessConfig,

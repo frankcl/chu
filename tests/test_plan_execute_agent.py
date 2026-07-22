@@ -1,5 +1,7 @@
 """Tests for agent/plan_execute_agent.py — PlannerOutput validator and step numbering."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from agent.plan_execute_agent import (
     _PlannerOutput,
@@ -7,6 +9,8 @@ from agent.plan_execute_agent import (
     _extend_callbacks,
     _filter_final_synthesis_tasks,
     _is_final_synthesis_task,
+    _planner_prompt,
+    _summarizer_prompt,
 )
 
 
@@ -146,6 +150,20 @@ def test_filter_final_synthesis_task_keeps_one_task_if_all_filtered():
 
     assert [task.id for task in filtered] == ["final"]
     assert filtered[0].depends_on == []
+
+
+def test_plan_execute_prompts_include_guardrail_rules():
+    from agent.skills import SkillRegistry
+    from harness import HarnessConfig, guardrail_system_rules
+
+    cfg = HarnessConfig()
+    rules = guardrail_system_rules(cfg)
+    planner_messages = _planner_prompt(SkillRegistry.resolve(False), cfg).format_messages(input="x")
+    summarizer_messages = _summarizer_prompt(cfg).format_messages(input="x", past_steps="")
+
+    assert rules
+    assert rules in planner_messages[0].content
+    assert rules in summarizer_messages[0].content
 
 
 # ── Step number calculation ───────────────────────────────────────────────────
@@ -315,7 +333,7 @@ async def test_independent_tasks_run_in_parallel_and_dependency_waits():
     from unittest.mock import MagicMock, patch
     import asyncio
 
-    from agent.harness import HarnessConfig
+    from harness import HarnessConfig
     from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
     from langchain_core.messages import AIMessageChunk
 
@@ -448,7 +466,7 @@ async def test_final_synthesis_task_is_not_executed_but_summarizer_runs():
 async def test_task_tool_budget_failure_is_local():
     from unittest.mock import MagicMock, patch
 
-    from agent.harness import HarnessConfig
+    from harness import HarnessConfig
     from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
     from langchain_core.messages import AIMessageChunk
 
@@ -890,6 +908,3 @@ class TestRunPlanExecuteAgent:
 
         from agent.plan_execute_agent import run_plan_execute_agent
         assert run_plan_execute_agent("test") == ""
-
-
-from unittest.mock import AsyncMock, MagicMock
