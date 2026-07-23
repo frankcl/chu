@@ -9,13 +9,14 @@ import os
 import re
 import subprocess
 import sys
+from typing import Annotated
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool, StructuredTool, tool
+from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool, tool
 
 from logger import get_logger
 from utils.env_util import env_int
@@ -275,7 +276,7 @@ def build_skill_tools(registry: SkillRegistry, per_tool_timeout: float) -> list[
         skill: str,
         script: str,
         script_args: list[str] | str | None = None,
-        config: RunnableConfig = None,  # 运行时注入，不进入模型可见的工具 schema
+        config: Annotated[RunnableConfig, InjectedToolArg()] = None,  # 运行时注入，不进入模型可见 schema
     ) -> str:
         """Run a script bundled inside a skill's directory and return its output.
 

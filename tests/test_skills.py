@@ -213,6 +213,10 @@ class TestRunSkillScript:
         out = run.invoke({"skill": "runner", "script": "go.py"})
         assert "exit_code=0" in out
 
+    def test_config_is_not_model_visible_arg(self, tmp_path):
+        _, run = self._tools(tmp_path, "print(1)")
+        assert "config" not in run.args
+
     def test_unknown_skill(self, tmp_path):
         _, run = self._tools(tmp_path, "print(1)")
         assert "Unknown skill" in run.invoke({"skill": "ghost", "script": "go.py"})
