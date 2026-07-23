@@ -232,7 +232,7 @@ class TestPlanExecuteIntegration:
 
     After the async/streaming refactor:
       - planner is called via .ainvoke (async)
-      - executor is called via .astream(stream_mode="messages")
+      - executor is called via .astream(stream_mode=["updates", "custom"])
       - summarizer is called via .astream
 
     Memory/time note: compiling a LangGraph (~pregel runtime, callbacks managers,
@@ -273,7 +273,7 @@ class TestPlanExecuteIntegration:
         # executor.astream(...) directly. An async generator function works here.
         async def fake_exec_astream(state, **_kwargs):
             holder["captured"].append(state["messages"][0][1])
-            yield AIMessageChunk(content="step result"), {"langgraph_node": "agent"}
+            yield "custom", {"phase": "agent_text", "text": "step result"}
         mock_executor = MagicMock()
         mock_executor.astream = fake_exec_astream
         # PlanExecuteAgent builds its executor via ReActAgent(...).compiled — patch
@@ -362,8 +362,9 @@ async def test_independent_tasks_run_in_parallel_and_dependency_waits():
         holder["max_active"] = max(holder["max_active"], holder["active"])
         try:
             await asyncio.sleep(0.03)
-            yield AIMessageChunk(content=f"result for {query.splitlines()[0]}"), {
-                "langgraph_node": "agent",
+            yield "custom", {
+                "phase": "agent_text",
+                "text": f"result for {query.splitlines()[0]}",
             }
         finally:
             holder["active"] -= 1
@@ -431,8 +432,9 @@ async def test_final_synthesis_task_is_not_executed_but_summarizer_runs():
     async def fake_exec_astream(state, **_kwargs):
         query = state["messages"][0][1]
         captured.append(query)
-        yield AIMessageChunk(content=f"result for {query.splitlines()[0]}"), {
-            "langgraph_node": "agent",
+        yield "custom", {
+            "phase": "agent_text",
+            "text": f"result for {query.splitlines()[0]}",
         }
 
     mock_executor = MagicMock()
@@ -546,11 +548,8 @@ async def test_second_task_thinking_is_forwarded_as_custom_event():
     async def fake_exec_astream(state, **_kwargs):
         query = state["messages"][0][1]
         step_label = "second" if query.startswith("task B") else "first"
-        yield AIMessageChunk(
-            content="",
-            additional_kwargs={"reasoning_content": f"{step_label} thinking"},
-        ), {"langgraph_node": "agent"}
-        yield AIMessageChunk(content=f"{step_label} result"), {"langgraph_node": "agent"}
+        yield "custom", {"phase": "agent_thinking", "text": f"{step_label} thinking"}
+        yield "custom", {"phase": "agent_text", "text": f"{step_label} result"}
 
     mock_executor = MagicMock()
     mock_executor.astream = fake_exec_astream
@@ -601,7 +600,10 @@ async def test_task_custom_agent_chunks_are_forwarded_without_duplicate_message(
     mock_llm.with_retry.return_value = mock_llm
     mock_llm.return_value = AIMessage(content="final answer")
 
-    async def fake_exec_astream(_state, **_kwargs):
+    captured_stream_modes = []
+
+    async def fake_exec_astream(_state, **kwargs):
+        captured_stream_modes.append(kwargs.get("stream_mode"))
         yield "custom", {"phase": "agent_thinking", "text": "think "}
         yield "custom", {"phase": "agent_text", "text": "part "}
         yield "custom", {"phase": "agent_text", "text": "answer"}
@@ -639,6 +641,85 @@ async def test_task_custom_agent_chunks_are_forwarded_without_duplicate_message(
 
     assert thinking_events == ["think "]
     assert token_events == ["part ", "answer"]
+    assert captured_stream_modes == [["updates", "custom"]]
+
+
+async def test_nested_react_streams_custom_tokens_for_second_task():
+    from unittest.mock import patch
+
+    from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, AIMessageChunk
+    from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+    from pydantic import PrivateAttr
+
+    class FakePlanner:
+        def with_retry(self, *_args, **_kwargs):
+            return self
+
+        def __call__(self, *_args, **_kwargs):
+            return _PlannerOutput.model_validate({
+                "tasks": [
+                    {"id": "a", "title": "A", "description": "task A", "depends_on": []},
+                    {"id": "b", "title": "B", "description": "task B", "depends_on": ["a"]},
+                ],
+            })
+
+    class FakeChatModel(BaseChatModel):
+        _calls: int = PrivateAttr(default=0)
+
+        def bind_tools(self, _tools, **_kwargs):
+            return self
+
+        def with_retry(self, *_args, **_kwargs):
+            return self
+
+        def with_structured_output(self, *_args, **_kwargs):
+            return FakePlanner()
+
+        def _generate(self, _messages, stop=None, run_manager=None, **_kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="summary"))])
+
+        async def _astream(self, _messages, stop=None, run_manager=None, **_kwargs):
+            self._calls += 1
+            n = self._calls
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    additional_kwargs={"reasoning_content": f"think{n} "},
+                )
+            )
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"answer{n} "))
+
+        @property
+        def _llm_type(self):
+            return "fake-chat"
+
+    with patch("agent.llm.LLM.chat_model", return_value=FakeChatModel()):
+        agent = create_plan_execute_agent()
+        events = []
+        async for mode, data in agent.astream({
+            "input": "test",
+            "plan": [],
+            "plan_total": 0,
+            "tasks": [],
+            "task_results": {},
+            "task_errors": {},
+            "past_steps": [],
+            "response": None,
+        }, stream_mode=["custom", "updates"]):
+            if mode == "custom" and data.get("phase") in {
+                "execute_thinking",
+                "execute_token",
+                "execute_done",
+            }:
+                events.append(data)
+
+    step2 = [event for event in events if event.get("step_num") == 2]
+    step2_phases = [event["phase"] for event in step2]
+    assert step2_phases[:3] == ["execute_thinking", "execute_token", "execute_done"]
+    assert step2[0]["text"] == "think2 "
+    assert step2[1]["text"] == "answer2 "
 
 
 async def test_task_tool_result_uses_tool_message_call_id():
@@ -663,8 +744,12 @@ async def test_task_tool_result_uses_tool_message_call_id():
     mock_llm.return_value = AIMessage(content="final answer")
 
     async def fake_exec_astream(_state, **_kwargs):
-        yield ToolMessage(content="sunny", name="get_weather", tool_call_id="call-1"), {
-            "langgraph_node": "tools",
+        yield "updates", {
+            "tools": {
+                "messages": [
+                    ToolMessage(content="sunny", name="get_weather", tool_call_id="call-1")
+                ]
+            }
         }
         yield "updates", {"agent": {"messages": [AIMessage(content="done")]}}
 

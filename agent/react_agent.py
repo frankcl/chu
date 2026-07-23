@@ -151,6 +151,9 @@ class ReActAgent:
             chunk: BaseMessageChunk | None = None
             async for part in bound.astream(messages):
                 if isinstance(part, BaseMessageChunk):
+                    # This custom stream is consumed by PlanExecuteAgent when ReAct runs
+                    # as a nested executor. LangGraph's messages stream can miss later
+                    # nested runs, while custom events remain stable.
                     if writer is not None:
                         for kind, text in LLM.iter_outputs(part):
                             writer({"phase": f"agent_{kind}", "text": text})

@@ -12,7 +12,7 @@ import uuid
 from typing import Annotated, TypedDict
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -418,7 +418,6 @@ class PlanExecuteAgent:
                     thinking_parts: list[str] = []
                     fallback_answer = ""
                     fallback_thinking = ""
-                    custom_stream_seen = False
                     seen_tool_results: set[str] = set()
 
                     def emit_tool_result(msg: ToolMessage):
@@ -447,13 +446,12 @@ class PlanExecuteAgent:
                         async for mode, payload in executor.astream(
                             {"messages": [("human", query)]},
                             config=task_config,
-                            stream_mode=["messages", "updates", "custom"],
+                            stream_mode=["updates", "custom"],
                         ):
                             if mode == "custom":
                                 phase = payload.get("phase") if isinstance(payload, dict) else None
                                 text = payload.get("text") if isinstance(payload, dict) else None
                                 if phase == "agent_thinking" and text:
-                                    custom_stream_seen = True
                                     thinking_parts.append(text)
                                     writer({
                                         "phase": "execute_thinking",
@@ -462,7 +460,6 @@ class PlanExecuteAgent:
                                         "text": text,
                                     })
                                 elif phase == "agent_text" and text:
-                                    custom_stream_seen = True
                                     parts.append(text)
                                     writer({
                                         "phase": "execute_token",
@@ -471,35 +468,7 @@ class PlanExecuteAgent:
                                         "text": text,
                                     })
                                 continue
-                            if mode not in ("messages", "updates"):
-                                payload = (mode, payload)
-                                mode = "messages"
-                            if mode == "messages":
-                                chunk, meta = payload
-                                node = meta.get("langgraph_node")
-                                if node == "agent" and isinstance(chunk, AIMessageChunk):
-                                    if custom_stream_seen:
-                                        continue
-                                    for kind, text in LLM.iter_outputs(chunk):
-                                        if kind == "thinking":
-                                            thinking_parts.append(text)
-                                            writer({
-                                                "phase": "execute_thinking",
-                                                "task_id": task.id,
-                                                "step_num": step_num,
-                                                "text": text,
-                                            })
-                                        else:
-                                            parts.append(text)
-                                            writer({
-                                                "phase": "execute_token",
-                                                "task_id": task.id,
-                                                "step_num": step_num,
-                                                "text": text,
-                                            })
-                                elif node == "tools" and isinstance(chunk, ToolMessage):
-                                    emit_tool_result(chunk)
-                            elif mode == "updates":
+                            if mode == "updates":
                                 tool_update = payload.get("tools") if isinstance(payload, dict) else None
                                 tool_messages = tool_update.get("messages") if isinstance(tool_update, dict) else None
                                 if tool_messages:

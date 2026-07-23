@@ -193,6 +193,7 @@ class TestCreateAgent:
         mock_bound.invoke.return_value = AIMessage(content="fallback")
 
         async def fake_astream(_messages):
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "think "})
             yield AIMessageChunk(content="stream ")
             yield AIMessageChunk(content="answer")
 
@@ -209,6 +210,7 @@ class TestCreateAgent:
             if mode == "custom":
                 events.append(data)
 
+        assert {"phase": "agent_thinking", "text": "think "} in events
         assert {"phase": "agent_text", "text": "stream "} in events
         assert {"phase": "agent_text", "text": "answer"} in events
 
