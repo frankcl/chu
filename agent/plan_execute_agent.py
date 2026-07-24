@@ -29,8 +29,8 @@ from harness import (
 from .llm import LLM
 from logger import get_logger
 from .react_agent import ReActAgent
-from .skills import SkillRegistry, skills_overview
-from .source_meta import extract_source_favicons
+from .skills import SkillRegistry
+from .source_meta import source_favicons_for_tool
 
 logger = get_logger("plan_execute_agent")
 
@@ -39,32 +39,36 @@ class _PlanToolEvents:
     def __init__(self):
         self.counter = 0
         self.pending: dict[str, deque[str]] = defaultdict(deque)
+        self.inputs: dict[str, str] = {}
         self.seen_starts: set[str] = set()
 
-    def start(self, name: str, run_id=None) -> str | None:
-        key = str(run_id) if run_id else ""
+    def start(self, name: str, tool_input: str, tool_call_id=None, run_id=None) -> str | None:
+        key = str(tool_call_id or run_id or "")
         if key and key in self.seen_starts:
             return None
         if key:
             self.seen_starts.add(key)
         self.counter += 1
-        tool_call_id = key or f"tool-{self.counter}-{uuid.uuid4().hex[:8]}"
-        self.pending[name].append(tool_call_id)
-        return tool_call_id
+        event_tool_call_id = key or f"tool-{self.counter}-{uuid.uuid4().hex[:8]}"
+        self.pending[name].append(event_tool_call_id)
+        self.inputs[event_tool_call_id] = tool_input
+        return event_tool_call_id
 
-    def finish(self, name: str, tool_call_id: str | None = None) -> str:
+    def finish(self, name: str, tool_call_id: str | None = None) -> tuple[str, str]:
         pending = self.pending.get(name)
         if tool_call_id:
+            input_id = tool_call_id
             if pending:
                 try:
                     pending.remove(tool_call_id)
                 except ValueError:
-                    pending.popleft()
-            return tool_call_id
+                    input_id = pending.popleft()
+            return tool_call_id, self.inputs.pop(input_id, "")
         if pending:
-            return pending.popleft()
+            finished_id = pending.popleft()
+            return finished_id, self.inputs.pop(finished_id, "")
         self.counter += 1
-        return f"tool-{self.counter}-{uuid.uuid4().hex[:8]}"
+        return f"tool-{self.counter}-{uuid.uuid4().hex[:8]}", ""
 
 
 class _PlanToolStartCallback(BaseCallbackHandler):
@@ -81,7 +85,13 @@ class _PlanToolStartCallback(BaseCallbackHandler):
         if isinstance(serialized, dict):
             name = serialized.get("name") or serialized.get("id") or ""
         name = str(name or "tool")
-        tool_call_id = self.events.start(name, kwargs.get("run_id"))
+        tool_input = str(input_str or "")
+        tool_call_id = self.events.start(
+            name,
+            tool_input,
+            tool_call_id=kwargs.get("tool_call_id"),
+            run_id=kwargs.get("run_id"),
+        )
         if tool_call_id is None:
             return
         self.writer({
@@ -90,7 +100,7 @@ class _PlanToolStartCallback(BaseCallbackHandler):
             "step_num": self.step_num,
             "tool_call_id": tool_call_id,
             "name": name,
-            "input": str(input_str or "")[:500],
+            "input": tool_input[:500],
         })
 
 
@@ -251,15 +261,12 @@ def _filter_final_synthesis_tasks(tasks: list[_TaskSpec]) -> list[_TaskSpec]:
     return filtered
 
 
-def _planner_prompt(registry: SkillRegistry, cfg: HarnessConfig) -> ChatPromptTemplate:
-    """Planner prompt；当存在 skill 时把概览追加进 system 消息，使规划感知 skill。"""
+def _planner_prompt(cfg: HarnessConfig) -> ChatPromptTemplate:
+    """Planner prompt for task decomposition only; execution handles skill selection."""
     system = _PLANNER_SYSTEM
     rules = guardrail_system_rules(cfg)
     if rules:
         system = system + "\n\n" + rules
-    if not registry.is_empty():
-        overview = skills_overview(registry).replace("{", "{{").replace("}", "}}")
-        system = system + "\n\n" + overview
     return ChatPromptTemplate.from_messages([("system", system), ("human", "{input}")])
 
 
@@ -302,7 +309,7 @@ class PlanExecuteAgent:
         # structured-output (JSON mode) and thinking mode are mutually exclusive on
         # Qwen3 — with thinking on the model returns empty content, causing a parse error.
         base_no_think = self.llm.chat_model(thinking=False)
-        # Skills：下传给执行器（每步用的 ReActAgent），并让 planner 感知可用 skill。
+        # Skills are handled by the executor; the planner only decomposes work.
         registry = SkillRegistry.resolve(skills)
         # 第三层复用第二层：executor 是一个 ReActAgent 的 compiled graph。
         # 下传 hitl_channel：HITL 工具活在内层执行器里、由它阻塞；hitl 事件直接进会话
@@ -313,7 +320,7 @@ class PlanExecuteAgent:
         ).compiled
         # with_structured_output / retry order matters: bind/configure on the raw
         # BaseChatModel first, then wrap the resulting Runnable with retry.
-        self._planner = _planner_prompt(registry, cfg) | apply_llm_retry(
+        self._planner = _planner_prompt(cfg) | apply_llm_retry(
             base_no_think.with_structured_output(_PlannerOutput), cfg,
         )
         self._summarizer = _summarizer_prompt(cfg) | apply_llm_retry(base_no_think, cfg)
@@ -432,14 +439,15 @@ class PlanExecuteAgent:
                         if dedupe_key in seen_tool_results:
                             return
                         seen_tool_results.add(dedupe_key)
+                        finished_tool_call_id, tool_input = tool_events.finish(name, raw_tool_call_id)
                         writer({
                             "phase": "execute_tool",
                             "task_id": task.id,
                             "step_num": step_num,
-                            "tool_call_id": tool_events.finish(name, raw_tool_call_id),
+                            "tool_call_id": finished_tool_call_id,
                             "name": name,
                             "result": result[:800],
-                            "source_favicons": extract_source_favicons(result),
+                            "source_favicons": source_favicons_for_tool(name, result, tool_input),
                         })
 
                     try:

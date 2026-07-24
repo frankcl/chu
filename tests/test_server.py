@@ -378,6 +378,108 @@ class TestChat:
         assert tool_events[0]["name"] == "get_weather"
         assert "sunny" in tool_events[0]["result"]
 
+    def test_react_stream_extracts_favicons_for_web_research_search_script(self, client, mock_react_agent):
+        """Only web-research/search.py tool results carry source favicon metadata."""
+        from langchain_core.messages import ToolMessage
+
+        result = '{"results":[{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}]}'
+        tool_msg = ToolMessage(content=result, name="run_skill_script", tool_call_id="1")
+        metadata = {"langgraph_node": "tools"}
+
+        async def fake_astream(*args, **kwargs):
+            for cb in kwargs["config"]["callbacks"]:
+                if cb.__class__.__name__ == "_SseToolStartCallback":
+                    cb.on_tool_start(
+                        {"name": "run_skill_script"},
+                        '{"skill":"web-research","script":"search.py","script_args":["q"]}',
+                        tool_call_id="1",
+                    )
+            yield tool_msg, metadata
+
+        mock_react_agent.astream = fake_astream
+
+        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
+        resp = client.post(f"/api/chat/{session_id}", json={"message": "search"})
+
+        events = _parse_sse(resp.text)
+        tool_events = [e for e in events if e.get("type") == "tool"]
+        assert tool_events[0]["source_favicons"] == [{
+            "url": "https://example.com/a",
+            "favicon": "https://cdn.example.com/icon.png",
+        }]
+
+    def test_react_stream_matches_tool_input_by_call_id_when_same_tool_returns_out_of_order(
+        self, client, mock_react_agent,
+    ):
+        """Same-name tools must use tool_call_id rather than input queue order."""
+        from langchain_core.messages import ToolMessage
+
+        search_result = (
+            '{"results":[{"url":"https://example.com/a",'
+            '"favicon":"https://cdn.example.com/icon.png"}]}'
+        )
+        other_result = (
+            '{"results":[{"url":"https://wrong.example/a",'
+            '"favicon":"https://wrong.example/icon.png"}]}'
+        )
+        metadata = {"langgraph_node": "tools"}
+
+        async def fake_astream(*args, **kwargs):
+            for cb in kwargs["config"]["callbacks"]:
+                if cb.__class__.__name__ == "_SseToolStartCallback":
+                    cb.on_tool_start(
+                        {"name": "run_skill_script"},
+                        '{"skill":"ppt","script":"search_image.py","script_args":["q"]}',
+                        tool_call_id="call-other",
+                    )
+                    cb.on_tool_start(
+                        {"name": "run_skill_script"},
+                        '{"skill":"web-research","script":"search.py","script_args":["q"]}',
+                        tool_call_id="call-search",
+                    )
+            yield ToolMessage(
+                content=search_result,
+                name="run_skill_script",
+                tool_call_id="call-search",
+            ), metadata
+            yield ToolMessage(
+                content=other_result,
+                name="run_skill_script",
+                tool_call_id="call-other",
+            ), metadata
+
+        mock_react_agent.astream = fake_astream
+
+        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
+        resp = client.post(f"/api/chat/{session_id}", json={"message": "search"})
+
+        tool_events = [e for e in _parse_sse(resp.text) if e.get("type") == "tool"]
+        assert tool_events[0]["source_favicons"] == [{
+            "url": "https://example.com/a",
+            "favicon": "https://cdn.example.com/icon.png",
+        }]
+        assert tool_events[1]["source_favicons"] == []
+
+    def test_react_stream_does_not_extract_favicons_for_non_search_tool(self, client, mock_react_agent):
+        """Non-search tool results keep the source_favicons field empty."""
+        from langchain_core.messages import ToolMessage
+
+        result = '{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}'
+        tool_msg = ToolMessage(content=result, name="get_weather", tool_call_id="1")
+        metadata = {"langgraph_node": "tools"}
+
+        async def fake_astream(*args, **kwargs):
+            yield tool_msg, metadata
+
+        mock_react_agent.astream = fake_astream
+
+        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
+        resp = client.post(f"/api/chat/{session_id}", json={"message": "weather?"})
+
+        events = _parse_sse(resp.text)
+        tool_events = [e for e in events if e.get("type") == "tool"]
+        assert tool_events[0]["source_favicons"] == []
+
     def test_react_stream_tool_start_event(self, client, mock_react_agent):
         """Tool start callback → 'tool_start' SSE before the ToolMessage returns."""
         from langchain_core.messages import ToolMessage

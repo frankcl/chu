@@ -28,7 +28,7 @@ from agent import (
     create_plan_execute_agent,
     iter_chunk_outputs,
 )
-from agent.source_meta import extract_source_favicons
+from agent.source_meta import source_favicons_for_tool
 from harness import (
     BudgetExceededError,
     BudgetTracker,
@@ -367,16 +367,27 @@ class _SseToolStartCallback(BaseCallbackHandler):
 
     def __init__(self, emit):
         self.emit = emit
+        self.inputs_by_call_id: dict[str, str] = {}
 
     def on_tool_start(self, serialized, input_str, **kwargs):  # type: ignore[override]
         name = ""
         if isinstance(serialized, dict):
             name = serialized.get("name") or serialized.get("id") or ""
+        name = str(name or "tool")
+        tool_input = str(input_str or "")
+        tool_call_id = str(kwargs.get("tool_call_id") or kwargs.get("run_id") or "")
+        if tool_call_id:
+            self.inputs_by_call_id[tool_call_id] = tool_input
         self.emit({
             "type": "tool_start",
-            "name": str(name or "tool"),
-            "input": str(input_str or "")[:500],
+            "name": name,
+            "input": tool_input[:500],
         })
+
+    def finish(self, tool_call_id: str | None) -> str:
+        if not tool_call_id:
+            return ""
+        return self.inputs_by_call_id.pop(str(tool_call_id), "")
 
 
 def _harness_from_request(body: SessionRequest) -> HarnessConfig:
@@ -710,8 +721,10 @@ async def chat(session_id: str, body: ChatRequest):
     # request_user_choice tool then awaits the user's answer (POST /respond).
     hitl: HitlChannel = session["hitl"]
     hitl.bind_emit(queue.put_nowait)
+    tool_start_callback = None
     if mode == "react":
-        run_config["callbacks"].append(_SseToolStartCallback(queue.put_nowait))
+        tool_start_callback = _SseToolStartCallback(queue.put_nowait)
+        run_config["callbacks"].append(tool_start_callback)
 
     # 对话历史落库：session_id == chat_session.id。用户消息先落库、AI 产出累积后
     # 在流终止点落库（部分完成也存）。未配置 MySQL / 未登录则跳过。
@@ -768,11 +781,14 @@ async def chat(session_id: str, body: ChatRequest):
                     result = (
                         chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                     )
+                    name = str(chunk.name or "tool")
+                    raw_tool_call_id = getattr(chunk, "tool_call_id", None)
+                    tool_input = tool_start_callback.finish(raw_tool_call_id) if tool_start_callback else ""
                     await queue.put({
                         "type": "tool",
-                        "name": chunk.name,
+                        "name": name,
                         "result": result[:800],
-                        "source_favicons": extract_source_favicons(result),
+                        "source_favicons": source_favicons_for_tool(name, result, tool_input),
                     })
         finally:
             await queue.put(SENTINEL)

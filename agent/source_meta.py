@@ -61,3 +61,37 @@ def extract_source_favicons(text: str, limit: int = 50) -> list[dict[str, str]]:
                 break
 
     return [{"url": url, "favicon": favicon} for url, favicon in list(found.items())[:limit]]
+
+
+def _is_web_research_search_input(tool_input: Any) -> bool:
+    if isinstance(tool_input, dict):
+        return (
+            str(tool_input.get("skill") or "") == "web-research"
+            and str(tool_input.get("script") or "") == "search.py"
+        )
+    raw = str(tool_input or "")
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return _is_web_research_search_input(parsed)
+    except Exception:
+        pass
+    return bool(
+        re.search(r'["\']?skill["\']?\s*[:=]\s*["\']web-research["\']', raw)
+        and re.search(r'["\']?script["\']?\s*[:=]\s*["\']search\.py["\']', raw)
+    )
+
+
+def source_favicons_for_tool(
+    tool_name: Any,
+    result: str,
+    tool_input: Any = None,
+    limit: int = 50,
+) -> list[dict[str, str]]:
+    """Return source favicons only for the web search script result."""
+    name = str(tool_name or "")
+    if name == "search" or (name == "run_skill_script" and _is_web_research_search_input(tool_input)):
+        return extract_source_favicons(result, limit=limit)
+    return []

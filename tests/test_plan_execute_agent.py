@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agent.plan_execute_agent import (
+    _PlanToolEvents,
     _PlannerOutput,
     _TaskSpec,
     _extend_callbacks,
@@ -153,17 +154,33 @@ def test_filter_final_synthesis_task_keeps_one_task_if_all_filtered():
 
 
 def test_plan_execute_prompts_include_guardrail_rules():
-    from agent.skills import SkillRegistry
     from harness import HarnessConfig, guardrail_system_rules
 
     cfg = HarnessConfig()
     rules = guardrail_system_rules(cfg)
-    planner_messages = _planner_prompt(SkillRegistry.resolve(False), cfg).format_messages(input="x")
+    planner_messages = _planner_prompt(cfg).format_messages(input="x")
     summarizer_messages = _summarizer_prompt(cfg).format_messages(input="x", past_steps="")
 
     assert rules
     assert rules in planner_messages[0].content
     assert rules in summarizer_messages[0].content
+
+
+def test_plan_execute_planner_prompt_omits_skills_overview():
+    from harness import HarnessConfig
+
+    planner_messages = _planner_prompt(HarnessConfig()).format_messages(input="x")
+
+    assert "## Available Skills" not in planner_messages[0].content
+
+
+def test_plan_tool_events_match_inputs_by_tool_call_id():
+    events = _PlanToolEvents()
+    events.start("run_skill_script", "other input", tool_call_id="call-other")
+    events.start("run_skill_script", "search input", tool_call_id="call-search")
+
+    assert events.finish("run_skill_script", "call-search") == ("call-search", "search input")
+    assert events.finish("run_skill_script", "call-other") == ("call-other", "other input")
 
 
 # ── Step number calculation ───────────────────────────────────────────────────
@@ -840,6 +857,138 @@ async def test_task_tool_result_is_forwarded_from_tools_update():
     assert events[0]["name"] == "search"
     assert events[0]["tool_call_id"] == "tool-call-1"
     assert events[0]["result"] == "tool result"
+
+
+async def test_task_tool_result_extracts_favicons_for_web_research_search_script():
+    from unittest.mock import MagicMock, patch
+
+    from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    planner_output = _PlannerOutput.model_validate({
+        "tasks": [
+            {"id": "a", "title": "A", "description": "task A", "depends_on": []},
+        ],
+    })
+
+    mock_chain = MagicMock()
+    mock_chain.side_effect = lambda *_a, **_kw: planner_output
+    mock_chain.with_retry.return_value = mock_chain
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_chain
+    mock_llm.with_retry.return_value = mock_llm
+    mock_llm.return_value = AIMessage(content="final answer")
+
+    result = '{"results":[{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}]}'
+
+    async def fake_exec_astream(_state, **kwargs):
+        callbacks = kwargs["config"]["callbacks"]
+        handlers = getattr(callbacks, "handlers", None) or getattr(callbacks, "inheritable_handlers", None) or callbacks
+        for cb in handlers:
+            if cb.__class__.__name__ == "_PlanToolStartCallback":
+                cb.on_tool_start(
+                    {"name": "run_skill_script"},
+                    '{"skill":"web-research","script":"search.py","script_args":["q"]}',
+                    tool_call_id="tool-call-1",
+                )
+        yield "updates", {
+            "tools": {
+                "messages": [
+                    ToolMessage(content=result, name="run_skill_script", tool_call_id="tool-call-1"),
+                ],
+            },
+        }
+        yield "updates", {"agent": {"messages": [AIMessage(content="done")]}}
+
+    mock_executor = MagicMock()
+    mock_executor.astream = fake_exec_astream
+    mock_react = MagicMock()
+    mock_react.return_value.compiled = mock_executor
+
+    with (
+        patch("agent.llm.LLM.chat_model", return_value=mock_llm),
+        patch("agent.plan_execute_agent.ReActAgent", mock_react),
+    ):
+        agent = create_plan_execute_agent()
+        events = []
+        async for mode, data in agent.astream({
+            "input": "test",
+            "plan": [],
+            "plan_total": 0,
+            "tasks": [],
+            "task_results": {},
+            "task_errors": {},
+            "past_steps": [],
+            "response": None,
+        }, stream_mode=["custom", "updates"]):
+            if mode == "custom" and data.get("phase") == "execute_tool":
+                events.append(data)
+
+    assert events[0]["source_favicons"] == [{
+        "url": "https://example.com/a",
+        "favicon": "https://cdn.example.com/icon.png",
+    }]
+
+
+async def test_task_tool_result_does_not_extract_favicons_for_non_search_tool():
+    from unittest.mock import MagicMock, patch
+
+    from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    planner_output = _PlannerOutput.model_validate({
+        "tasks": [
+            {"id": "a", "title": "A", "description": "task A", "depends_on": []},
+        ],
+    })
+
+    mock_chain = MagicMock()
+    mock_chain.side_effect = lambda *_a, **_kw: planner_output
+    mock_chain.with_retry.return_value = mock_chain
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_chain
+    mock_llm.with_retry.return_value = mock_llm
+    mock_llm.return_value = AIMessage(content="final answer")
+
+    result = '{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}'
+
+    async def fake_exec_astream(_state, **_kwargs):
+        yield "updates", {
+            "tools": {
+                "messages": [
+                    ToolMessage(content=result, name="get_weather", tool_call_id="tool-call-1"),
+                ],
+            },
+        }
+        yield "updates", {"agent": {"messages": [AIMessage(content="done")]}}
+
+    mock_executor = MagicMock()
+    mock_executor.astream = fake_exec_astream
+    mock_react = MagicMock()
+    mock_react.return_value.compiled = mock_executor
+
+    with (
+        patch("agent.llm.LLM.chat_model", return_value=mock_llm),
+        patch("agent.plan_execute_agent.ReActAgent", mock_react),
+    ):
+        agent = create_plan_execute_agent()
+        events = []
+        async for mode, data in agent.astream({
+            "input": "test",
+            "plan": [],
+            "plan_total": 0,
+            "tasks": [],
+            "task_results": {},
+            "task_errors": {},
+            "past_steps": [],
+            "response": None,
+        }, stream_mode=["custom", "updates"]):
+            if mode == "custom" and data.get("phase") == "execute_tool":
+                events.append(data)
+
+    assert events[0]["source_favicons"] == []
 
 
 async def test_task_tool_result_is_not_duplicated_from_messages_and_updates():
