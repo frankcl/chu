@@ -73,7 +73,7 @@ def init_db() -> bool:
         return False
     try:
         # Import models before create_all so their tables are registered on Base.
-        from storage import chat_message, chat_session  # noqa: F401
+        from storage import chat_message, chat_session, chat_summary  # noqa: F401
 
         _engine = create_engine(url, **_engine_options())
         Base.metadata.create_all(_engine)

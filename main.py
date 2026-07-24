@@ -3,7 +3,6 @@ import uuid
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessageChunk
-from langgraph.checkpoint.memory import MemorySaver
 
 from agent import (
     ConsoleHitlChannel,
@@ -13,16 +12,18 @@ from agent import (
 )
 from harness import BudgetTracker, HarnessConfig
 from logger import get_logger
+from memory import MemoryManager
 
 load_dotenv()
 logger = get_logger("main")
 
 
-def _stream_response(agent, user_input: str, config: dict):
+def _stream_response(agent, user_input: str, config: dict, memory: MemoryManager):
     in_thinking = False
     response_started = False
+    answer_parts: list[str] = []
     for chunk, metadata in agent.stream(
-        {"messages": [("human", user_input)]},
+        {"messages": memory.prepare_messages(user_input, config)},
         config=config,
         stream_mode="messages",
     ):
@@ -55,6 +56,7 @@ def _stream_response(agent, user_input: str, config: dict):
         # Regular response text
         text = extract_text_content(chunk.content)
         if text:
+            answer_parts.append(text)
             if in_thinking:
                 print("\n[/thinking]\n", flush=True)
                 in_thinking = False
@@ -66,11 +68,19 @@ def _stream_response(agent, user_input: str, config: dict):
     if in_thinking:
         print("\n[/thinking]", flush=True)
     print()
+    memory.commit_turn(user_input, "".join(answer_parts))
 
 
-def _run_plan_execute(agent, user_input: str, config: dict):
+def _run_plan_execute(agent, user_input: str, config: dict, memory: MemoryManager):
+    answer = ""
     for update in agent.stream(
-        {"input": user_input, "plan": [], "past_steps": [], "response": None},
+        {
+            "input": user_input,
+            "conversation_context": memory.conversation_context(user_input, config),
+            "plan": [],
+            "past_steps": [],
+            "response": None,
+        },
         config=config,
         stream_mode="updates",
     ):
@@ -93,6 +103,10 @@ def _run_plan_execute(agent, user_input: str, config: dict):
                     for i, step in enumerate(data["plan"], 1):
                         print(f"  {i}. {step}")
                     print()
+            elif node == "summarize" and data.get("response") is not None:
+                answer = data["response"]
+                print(f"Agent: {answer}")
+    memory.commit_turn(user_input, answer)
 
 
 def main():
@@ -110,6 +124,7 @@ def main():
     # budget. Without these the CLI has no backstop against a tool loop (e.g. the
     # ppt skill repeatedly calling build.py).
     cfg = HarnessConfig.from_env()
+    memory = MemoryManager(cfg)
 
     def make_config(thread_id: str) -> dict:
         # Fresh per turn: a new BudgetTracker + skill_call_counts so counters
@@ -124,12 +139,12 @@ def main():
     # works in the CLI too — it prompts on stdin and blocks for the answer.
     hitl = ConsoleHitlChannel()
     if args.mode == "plan-execute":
-        agent = create_plan_execute_agent(hitl_channel=hitl)
+        agent = create_plan_execute_agent(harness=cfg, hitl_channel=hitl)
         run_fn = _run_plan_execute
         logger.info("CLI started mode=plan-execute")
         print("Plan-Execute Agent ready. Commands: 'quit' to exit.\n")
     else:
-        agent = create_agent(checkpointer=MemorySaver(), hitl_channel=hitl)
+        agent = create_agent(harness=cfg, hitl_channel=hitl)
         run_fn = _stream_response
         logger.info("CLI started mode=react")
         print("Agent ready. Commands: 'quit' to exit, 'new' to reset conversation.\n")
@@ -149,12 +164,14 @@ def main():
             break
         if user_input.lower() == "new":
             thread_id = str(uuid.uuid4())
+            memory.clear()
             print("(New conversation started)\n")
             continue
 
         try:
-            run_fn(agent, user_input, make_config(thread_id))
+            run_fn(agent, user_input, make_config(thread_id), memory)
         except Exception as e:
+            memory.commit_turn(user_input, "", incomplete=True)
             logger.error("CLI error: %s", e, exc_info=True)
             print(f"\n[Error: {e}]")
 

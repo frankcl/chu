@@ -43,8 +43,8 @@ os.environ["MYSQL_DATABASE"] = ""
 
 # ---------------------------------------------------------------------------
 # server.sessions is a module-level dict. Each test that creates a session
-# adds an entry (with a compiled mock agent + MemorySaver checkpointer +
-# active_task slot). Without per-test cleanup it grows monotonically across
+# adds an entry (with a compiled mock agent + MemoryManager + active_task slot).
+# Without per-test cleanup it grows monotonically across
 # the whole suite — visible as "memory keeps climbing" when running pytest.
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session", autouse=True)

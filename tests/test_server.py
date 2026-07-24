@@ -78,6 +78,15 @@ class TestCreateSession:
         id2 = client.post("/api/sessions", json={}).json()["session_id"]
         assert id1 != id2
 
+    def test_invalid_memory_watermarks_are_rejected(self, client):
+        resp = client.post("/api/sessions", json={
+            "memory_max_tokens": 100,
+            "memory_target_tokens": 100,
+        })
+
+        assert resp.status_code == 422
+        assert "memory_target_tokens" in resp.json()["detail"]
+
 
 # ── 密码登录 → shield cookie 会话闭环 ─────────────────────────────────────────
 
@@ -191,6 +200,51 @@ class TestDeleteSession:
 
 
 class TestConversationHistory:
+    def test_rebuild_memory_uses_summary_and_uncovered_tail(self):
+        import server
+        from memory import MemorySnapshot
+
+        memory = MagicMock()
+        record = {"memory": memory}
+        state = {
+            "snapshot": {
+                "summary": {"key_facts": ["saved"]},
+                "covered_from_seq": 1,
+                "covered_through_seq": 4,
+                "covered_message_count": 4,
+                "summary_version": 1,
+                "estimated_tokens": 8,
+            },
+            "messages": [
+                {"seq": 5, "role": "user", "type": "text", "content": "tail"},
+            ],
+        }
+        with patch.object(server.db, "load_memory_state", return_value=state):
+            count = server._rebuild_memory(record, "c1", "userA")
+
+        assert count == 1
+        snapshot, messages = memory.restore.call_args.args
+        assert isinstance(snapshot, MemorySnapshot)
+        assert snapshot.covered_through_seq == 4
+        assert messages == state["messages"]
+
+    def test_rebuild_memory_falls_back_when_summary_storage_is_unavailable(self):
+        import server
+
+        memory = MagicMock()
+        history = [
+            {"seq": 1, "role": "user", "type": "text", "content": "full history"},
+            {"seq": 2, "role": "assistant", "type": "tool", "content": "ignored"},
+        ]
+        with (
+            patch.object(server.db, "load_memory_state", return_value=None),
+            patch.object(server.db, "get_messages", return_value=history),
+        ):
+            count = server._rebuild_memory({"memory": memory}, "c1", "userA")
+
+        assert count == 1
+        memory.load_history.assert_called_once_with(history)
+
     def test_list_conversations_passes_time_range(self, client):
         import server
 
@@ -215,6 +269,16 @@ class TestChat:
     def test_unknown_session_returns_404(self, client):
         resp = client.post("/api/chat/unknown-id", json={"message": "hello"})
         assert resp.status_code == 404
+
+    def test_concurrent_request_for_same_session_returns_conflict(self, client):
+        import server
+
+        session_id = client.post("/api/sessions", json={}).json()["session_id"]
+        server.sessions[session_id]["request_active"] = True
+
+        resp = client.post(f"/api/chat/{session_id}", json={"message": "hello"})
+
+        assert resp.status_code == 409
 
     def test_react_stream_returns_done_event(self, client):
         """A stream that yields no chunks should still emit a 'done' SSE event."""

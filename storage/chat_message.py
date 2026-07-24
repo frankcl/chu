@@ -36,14 +36,16 @@ class ChatMessage(Base):
     update_time: Mapped[int] = mapped_column(BigInteger)
 
 
-def append_messages(session_id: str, user_id: str, rows: list[dict[str, Any]]) -> None:
+def append_messages(session_id: str, user_id: str, rows: list[dict[str, Any]]) -> list[int]:
     """追加若干消息，seq 从当前最大值 +1 起自增，并刷新 session.update_time。
 
-    每个 row: {role, type, content?, extra?}。空列表直接返回。user_id 冗余写入每行。
+    每个 row: {role, type, content?, extra?}。返回与 rows 对齐的 seq 列表；
+    未启用存储、空列表或写入失败时返回空列表。user_id 冗余写入每行。
     """
     if not enabled() or not rows:
-        return
+        return []
     now = _now_ms()
+    assigned: list[int] = []
     try:
         with session_scope(write=True) as s:
             max_seq = s.scalar(
@@ -51,6 +53,7 @@ def append_messages(session_id: str, user_id: str, rows: list[dict[str, Any]]) -
             )
             seq = (max_seq or 0) + 1
             for row in rows:
+                assigned.append(seq)
                 s.add(ChatMessage(
                     session_id=session_id,
                     user_id=user_id or "",
@@ -66,8 +69,10 @@ def append_messages(session_id: str, user_id: str, rows: list[dict[str, Any]]) -
             conv = s.get(ChatSession, session_id)
             if conv is not None:
                 conv.update_time = now
+        return assigned
     except Exception:
         logger.exception("append_messages 失败 session=%s", session_id)
+        return []
 
 
 def get_messages(session_id: str, user_id: str) -> list[dict[str, Any]] | None:

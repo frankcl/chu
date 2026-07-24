@@ -85,8 +85,9 @@ export async function respondHitl(sessionId, id, value) {
  */
 export function streamChat(sessionId, message, callbacks) {
   const controller = new AbortController()
+  let activeSessionId = sessionId
 
-  const openStream = () => fetch(`/api/chat/${sessionId}`, {
+  const openStream = () => fetch(`/api/chat/${activeSessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
@@ -97,12 +98,19 @@ export function streamChat(sessionId, message, callbacks) {
 
   ;(async () => {
     try {
-      const res = await openStream()
+      let res = await openStream()
       if (res.type === 'opaqueredirect' || res.status === 401) {
         // 未登录/会话过期：shield 拦截，弹登录框。
         forceRelogin()
         callbacks.onError?.('未登录或登录已过期')
         return
+      }
+      // Runtime memory has a sliding TTL while persistent history does not.
+      // Recreate the runtime binding and retry exactly once; the 404 happens
+      // before the user message is persisted, so this cannot duplicate a turn.
+      if (res.status === 404 && callbacks.recoverSession) {
+        activeSessionId = await callbacks.recoverSession()
+        res = await openStream()
       }
       if (!res.ok) {
         const err = await res.text()

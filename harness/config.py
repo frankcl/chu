@@ -33,6 +33,12 @@ class HarnessConfig:
     enabled_guardrails: list[str] = field(default_factory=lambda: list(DEFAULT_GUARDRAILS))
     sensitive_output_scan: bool = True
     sensitive_output_action: str = "redact"
+    # Short-term memory limits are separate from the aggregate per-request
+    # provider budget controlled by ``max_tokens``.
+    memory_max_tokens: int = 24_000
+    memory_target_tokens: int = 12_000
+    memory_keep_recent_turns: int = 4
+    memory_ttl_seconds: float = 3_600.0
 
     def __post_init__(self) -> None:
         action = (self.sensitive_output_action or "redact").strip().lower()
@@ -40,6 +46,14 @@ class HarnessConfig:
             logger.warning("sensitive_output_action=%r is invalid, falling back to redact", self.sensitive_output_action)
             action = "redact"
         object.__setattr__(self, "sensitive_output_action", action)
+        if self.memory_max_tokens <= 0:
+            raise ValueError("memory_max_tokens must be positive")
+        if self.memory_target_tokens <= 0 or self.memory_target_tokens >= self.memory_max_tokens:
+            raise ValueError("memory_target_tokens must be positive and smaller than memory_max_tokens")
+        if self.memory_keep_recent_turns <= 0:
+            raise ValueError("memory_keep_recent_turns must be positive")
+        if self.memory_ttl_seconds <= 0:
+            raise ValueError("memory_ttl_seconds must be positive")
 
     @classmethod
     def from_env(cls) -> "HarnessConfig":
@@ -60,6 +74,10 @@ class HarnessConfig:
             enabled_guardrails=guardrails,
             sensitive_output_scan=env_bool("SENSITIVE_OUTPUT_SCAN", True, logger),
             sensitive_output_action=env_str("SENSITIVE_OUTPUT_ACTION", "redact"),
+            memory_max_tokens=env_int("MEMORY_MAX_TOKENS", 24_000, logger),
+            memory_target_tokens=env_int("MEMORY_TARGET_TOKENS", 12_000, logger),
+            memory_keep_recent_turns=env_int("MEMORY_KEEP_RECENT_TURNS", 4, logger),
+            memory_ttl_seconds=env_float("MEMORY_TTL_SECONDS", 3_600.0, logger),
         )
 
     def merge(self, overrides: dict[str, Any]) -> "HarnessConfig":

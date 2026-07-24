@@ -283,7 +283,7 @@ async function clearAllChats() {
     return  // 用户取消（二次确认未通过）
   }
   try {
-    await clearAllConversations()  // 后端清 DB + 运行时 session + MemorySaver
+    await clearAllConversations()  // 后端清 DB + 运行时 session + MemoryManager
     sessions.value = []
     currentSessionId.value = null
     ElMessage.success('已清除全部对话历史')
@@ -362,6 +362,20 @@ async function onSend(text) {
   startTicker(msg)  // begin counting immediately so the initial wait is timed too
 
   currentController.value = streamChat(session.sessionId, text, {
+    recoverSession: async () => {
+      let restoredId
+      try {
+        restoredId = await createSession(session.mode, { conversation_id: session.id })
+      } catch {
+        // A never-used session has no DB row yet; create a fresh runtime id.
+        restoredId = await createSession(session.mode)
+        const oldId = session.id
+        session.id = restoredId
+        if (currentSessionId.value === oldId) currentSessionId.value = restoredId
+      }
+      session.sessionId = restoredId
+      return restoredId
+    },
     onThinking: t => { msg.thinking += t },
     onText:     t => { msg.content += t },
     onHeartbeat: () => {},

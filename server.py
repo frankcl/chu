@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager, suppress
 import importlib.util
 import json
 import os
@@ -17,7 +18,6 @@ from hylian_client.sdk.fastapi import enable_hylian_shield
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from starlette.concurrency import run_in_threadpool
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
 
@@ -38,6 +38,8 @@ from harness import (
 )
 import storage as db
 from logger import get_logger
+from memory import MemoryManager, MemorySnapshot
+from utils.env_util import env_float
 
 load_dotenv()
 logger = get_logger("server")
@@ -45,7 +47,20 @@ logger = get_logger("server")
 # 对话历史持久化（MySQL）。未配置则禁用，历史相关 helper 优雅降级、不阻断对话。
 db.init_db()
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    sweeper = asyncio.create_task(_memory_sweeper())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
+        for session_id in list(sessions):
+            _teardown_session(session_id)
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # 接入 hylian SSO：shield（cookie/session 模式）中间件 + CORS（SDK 统一管理中间件顺序）。
 # 配置从 HYLIAN_* 环境变量读取；HYLIAN_EXCLUDE_PATTERNS 命中的路径放行。
@@ -225,8 +240,8 @@ def auth_me() -> dict:
         "register_time": user.create_time,  # ms epoch，前端格式化为日期
     }
 
-# session_id -> {"agent", "mode", "thread_id", "harness", "active_task", "hitl", "user_id"}
-# session_id == thread_id == 持久化的 chat_session.id（历史与记忆共享同一 id）。
+# session_id -> runtime agent, bounded MemoryManager, lifecycle and ownership.
+# Persistent chat history remains in MySQL and is independent of this cache.
 sessions: dict[str, dict] = {}
 
 
@@ -294,6 +309,10 @@ class SessionRequest(BaseModel):
     enabled_guardrails: list[str] | None = None
     sensitive_output_scan: bool | None = None
     sensitive_output_action: str | None = None
+    memory_max_tokens: int | None = None
+    memory_target_tokens: int | None = None
+    memory_keep_recent_turns: int | None = None
+    memory_ttl_seconds: float | None = None
 
 
 class ChatRequest(BaseModel):
@@ -396,52 +415,66 @@ def _harness_from_request(body: SessionRequest) -> HarnessConfig:
 
 
 def _build_session_record(session_id: str, mode: str, harness: HarnessConfig, user_id: str | None) -> dict:
-    """构建运行时 session（编译好的 agent + 内存 checkpointer + hitl）。
-
-    session_id 同时用作 thread_id —— 与持久化的 chat_session.id 一致，历史与记忆共享 id。
-    """
-    checkpointer = MemorySaver()
+    """Build an agent plus bounded, explicitly managed conversation memory."""
     hitl = HitlChannel()
     if mode == "plan-execute":
         agent = create_plan_execute_agent(
-            checkpointer=checkpointer, harness=harness, hitl_channel=hitl,
+            harness=harness, hitl_channel=hitl,
         )
     else:
-        agent = create_agent(checkpointer=checkpointer, harness=harness, hitl_channel=hitl)
+        agent = create_agent(harness=harness, hitl_channel=hitl)
     return {
         "agent": agent,
         "mode": mode,
         "thread_id": session_id,
         "harness": harness,
+        "memory": MemoryManager(harness=harness),
         "active_task": None,
+        "request_active": False,
         "hitl": hitl,
         "user_id": user_id,
+        "last_access_at": time.monotonic(),
     }
 
 
 def _rebuild_memory(record: dict, session_id: str, user_id: str) -> int:
-    """从历史「重建记忆」：只取 user / assistant-text 消息注入 checkpointer。
+    """Rebuild bounded-memory source turns from user/assistant text history.
 
     这是「对话历史」与「对话记忆」的分界 —— thinking/tool/plan/step 只属历史、
-    不进入喂给 LLM 的上下文。返回注入的消息条数。
+    不进入喂给 LLM 的上下文。压缩在下一次模型调用前执行。
     """
-    history = db.get_messages(session_id, user_id) or []
-    prior = [
-        ("human" if m["role"] == "user" else "ai", m["content"])
-        for m in history
-        if m["type"] == "text" and m.get("content")
-    ]
-    if prior:
-        record["agent"].update_state(
-            {"configurable": {"thread_id": session_id}}, {"messages": prior}
+    state = db.load_memory_state(session_id, user_id)
+    if state is None:
+        # The caller already verified ownership. If summary storage is
+        # temporarily unavailable, preserve the old full-history recovery path.
+        history = db.get_messages(session_id, user_id) or []
+        record["memory"].load_history(history)
+        return sum(
+            1 for row in history if row.get("type") == "text" and row.get("content")
         )
-    return len(prior)
+    snapshot = None
+    if state.get("snapshot") is not None:
+        try:
+            snapshot = MemorySnapshot.model_validate(state["snapshot"])
+        except Exception as exc:  # corrupted derived state: rebuild from source history
+            logger.warning("invalid memory snapshot session=%s: %s", session_id, exc)
+            history = db.get_messages(session_id, user_id) or []
+            record["memory"].load_history(history)
+            return sum(
+                1 for row in history if row.get("type") == "text" and row.get("content")
+            )
+    messages = state.get("messages") or []
+    record["memory"].restore(snapshot, messages)
+    return len(messages)
 
 
 @app.post("/api/sessions")
 def create_session(body: SessionRequest):
     user_id = _current_user_id()
-    harness = _harness_from_request(body)
+    try:
+        harness = _harness_from_request(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if body.conversation_id:
         # 继续历史对话：复用其 id（= thread_id），从历史重建记忆。
@@ -455,6 +488,8 @@ def create_session(body: SessionRequest):
             sessions[session_id] = record
             logger.info("session continued id=%s mode=%s rebuilt_msgs=%d replaced=%s",
                         session_id, body.mode, n, existing is not None)
+        else:
+            existing["last_access_at"] = time.monotonic()
     else:
         # 新对话：生成一个 id 兼作 thread_id；chat_session 首消息落库时懒创建。
         session_id = str(uuid.uuid4())
@@ -466,8 +501,7 @@ def create_session(body: SessionRequest):
 
 
 def _teardown_session(session_id: str) -> bool:
-    """清理运行时 session：取消 hitl/active_task，并显式清空该 thread 的对话记忆
-    （MemorySaver checkpointer）。返回是否确有该运行时 session。"""
+    """Release all runtime-only state. Persistent chat history is untouched."""
     s = sessions.pop(session_id, None)
     if not s:
         return False
@@ -475,14 +509,38 @@ def _teardown_session(session_id: str) -> bool:
         s["hitl"].cancel()
     if s.get("active_task"):
         s["active_task"].cancel()
-    # 显式删除对话记忆：不能只靠丢引用等 GC（active_task 未结束时仍被引用）。
-    checkpointer = getattr(s.get("agent"), "checkpointer", None)
-    if checkpointer is not None:
-        try:
-            checkpointer.delete_thread(session_id)
-        except Exception:  # noqa: BLE001 — 记忆清理失败不应阻断删除
-            logger.exception("delete_thread 失败 session=%s", session_id)
+    memory = s.get("memory")
+    if memory is not None:
+        memory.clear()
     return True
+
+
+async def _memory_sweeper() -> None:
+    """Periodically evict idle runtime sessions without touching DB history."""
+    interval = max(1.0, env_float("MEMORY_SWEEP_INTERVAL_SECONDS", 60.0, logger))
+    while True:
+        await asyncio.sleep(interval)
+        _evict_idle_sessions()
+
+
+def _evict_idle_sessions(now: float | None = None) -> list[str]:
+    """Evict eligible sessions once; split out for deterministic tests."""
+    now = time.monotonic() if now is None else now
+    evicted: list[str] = []
+    for session_id, record in list(sessions.items()):
+        task = record.get("active_task")
+        hitl = record.get("hitl")
+        if (
+            record.get("request_active")
+            or (task is not None and not task.done())
+            or (hitl is not None and hitl.is_pending())
+        ):
+            continue
+        ttl = record["harness"].memory_ttl_seconds
+        if now - record.get("last_access_at", now) >= ttl and _teardown_session(session_id):
+            evicted.append(session_id)
+            logger.info("idle runtime session evicted id=%s ttl=%.1fs", session_id, ttl)
+    return evicted
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -599,6 +657,7 @@ def cancel_chat(session_id: str):
     s = sessions.get(session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+    s["last_access_at"] = time.monotonic()
     if s.get("hitl"):
         s["hitl"].cancel()
     task = s.get("active_task")
@@ -615,6 +674,7 @@ def respond_chat(session_id: str, body: RespondRequest):
     s = sessions.get(session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+    s["last_access_at"] = time.monotonic()
     hitl: HitlChannel = s["hitl"]
     ok = hitl.respond(body.id, body.value)
     logger.info("hitl respond session=%s id=%s ok=%s", session_id, body.id, ok)
@@ -689,16 +749,35 @@ class _TurnRecorder:
             rows.append({"role": "assistant", "type": "text", "content": self.text})
         return rows
 
+    def memory_tool_results(self) -> list[str]:
+        """Small textual tool outcomes suitable for the next-turn memory."""
+        results = [
+            f"{tool.get('name') or 'tool'}: {tool.get('result', '')}"
+            for tool in self.tools
+            if tool.get("result")
+        ]
+        for num in sorted(self.steps):
+            for tool in self.steps[num]["tools"]:
+                if tool.get("result"):
+                    results.append(f"{tool.get('name') or 'tool'}: {tool.get('result', '')}")
+        return results
+
 
 @app.post("/api/chat/{session_id}")
 async def chat(session_id: str, body: ChatRequest):
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    active = session.get("active_task")
+    if session.get("request_active") or (active is not None and not active.done()):
+        raise HTTPException(status_code=409, detail="A chat request is already active for this session")
+    session["request_active"] = True
+    session["last_access_at"] = time.monotonic()
 
     agent = session["agent"]
     mode = session["mode"]
     harness: HarnessConfig = session["harness"]
+    memory: MemoryManager = session["memory"]
     tracker = BudgetTracker(harness)
     run_config = {
         # skill_call_counts：本轮 run_skill_script 的每 (skill,script) 计数容器，
@@ -732,26 +811,51 @@ async def chat(session_id: str, body: ChatRequest):
     persist = db.enabled() and user_id is not None
     recorder = _TurnRecorder()
 
+    async def persist_pending_memory_snapshot() -> None:
+        if not persist:
+            return
+        snapshot = memory.pending_snapshot()
+        if snapshot is None:
+            return
+        saved = await run_in_threadpool(
+            db.save_chat_summary,
+            session_id,
+            user_id,
+            snapshot.model_dump(mode="json"),
+        )
+        if saved:
+            memory.mark_snapshot_persisted(snapshot.covered_through_seq)
+
     guardrail_decision = evaluate_input_guardrails(body.message, harness)
     if guardrail_decision.blocked:
         answer = guardrail_decision.response or ""
         guarded_item, _ = guard_output_item({"type": "text", "content": answer}, harness)
 
         async def guarded_stream():
-            if persist:
-                await run_in_threadpool(
-                    db.create_conversation, session_id, user_id, body.message[:24]
+            try:
+                source_seqs: list[int] = []
+                if persist:
+                    await run_in_threadpool(
+                        db.create_conversation, session_id, user_id, body.message[:24]
+                    )
+                    source_seqs.extend((await run_in_threadpool(
+                        db.append_messages, session_id, user_id,
+                        [{"role": "user", "type": "text", "content": body.message}],
+                    )) or [])
+                    source_seqs.extend((await run_in_threadpool(
+                        db.append_messages, session_id, user_id,
+                        [{"role": "assistant", "type": "text", "content": guarded_item.get("content", "")}],
+                    )) or [])
+                memory.commit_turn(
+                    body.message,
+                    guarded_item.get("content", ""),
+                    source_seqs=source_seqs,
                 )
-                await run_in_threadpool(
-                    db.append_messages, session_id, user_id,
-                    [{"role": "user", "type": "text", "content": body.message}],
-                )
-                await run_in_threadpool(
-                    db.append_messages, session_id, user_id,
-                    [{"role": "assistant", "type": "text", "content": guarded_item.get("content", "")}],
-                )
-            yield _sse(guarded_item)
-            yield _sse({"type": "done"})
+                yield _sse(guarded_item)
+                yield _sse({"type": "done"})
+            finally:
+                session["request_active"] = False
+                session["last_access_at"] = time.monotonic()
 
         return StreamingResponse(
             guarded_stream(),
@@ -765,8 +869,10 @@ async def chat(session_id: str, body: ChatRequest):
 
     async def produce_react():
         try:
+            managed_messages = await memory.aprepare_messages(body.message, run_config)
+            await persist_pending_memory_snapshot()
             async for chunk, metadata in agent.astream(
-                {"messages": [("human", body.message)]},
+                {"messages": managed_messages},
                 config=run_config,
                 stream_mode="messages",
             ):
@@ -795,9 +901,12 @@ async def chat(session_id: str, body: ChatRequest):
 
     async def produce_plan_execute():
         try:
+            conversation_context = await memory.aconversation_context(body.message, run_config)
+            await persist_pending_memory_snapshot()
             async for mode, data in agent.astream(
                 {
                     "input": body.message,
+                    "conversation_context": conversation_context,
                     "plan": [],
                     "plan_total": 0,
                     "tasks": [],
@@ -891,15 +1000,17 @@ async def chat(session_id: str, body: ChatRequest):
 
     async def stream():
         t0 = time.monotonic()
+        turn_complete = False
+        user_source_seqs: list[int] = []
         # 用户消息先落库（首条消息时懒创建 chat_session，标题取首消息截断）。
         if persist:
             await run_in_threadpool(
                 db.create_conversation, session_id, user_id, body.message[:24]
             )
-            await run_in_threadpool(
+            user_source_seqs = (await run_in_threadpool(
                 db.append_messages, session_id, user_id,
                 [{"role": "user", "type": "text", "content": body.message}],
-            )
+            )) or []
         producer = asyncio.create_task(producer_coro)
         session["active_task"] = producer
         # idle timeout: each wait_for caps the gap between two events, not
@@ -980,21 +1091,38 @@ async def chat(session_id: str, body: ChatRequest):
 
             elapsed = time.monotonic() - t0
             logger.info("stream done session=%s elapsed=%.2fs", session_id, elapsed)
+            turn_complete = True
             yield _sse({"type": "done"})
         finally:
+            session["request_active"] = False
             session["active_task"] = None
+            session["last_access_at"] = time.monotonic()
             if not producer.done():
                 producer.cancel()
             # AI 产出落库（含被取消/中止/客户端断开时的部分产出）。
+            assistant_source_seqs: list[int] = []
             if persist:
                 rows = recorder.rows()
                 if rows:
-                    await run_in_threadpool(db.append_messages, session_id, user_id, rows)
+                    assigned_seqs = (await run_in_threadpool(
+                        db.append_messages, session_id, user_id, rows
+                    )) or []
+                    assistant_source_seqs = [
+                        seq for row, seq in zip(rows, assigned_seqs)
+                        if row.get("type") == "text"
+                    ]
                 # 本轮 token 用量累加到 chat_session（每轮一次，不重复计）。
                 await run_in_threadpool(
                     db.add_session_usage, session_id,
                     tracker.input_tokens, tracker.output_tokens, tracker.total_tokens,
                 )
+            memory.commit_turn(
+                body.message,
+                recorder.text,
+                tool_results=recorder.memory_tool_results(),
+                incomplete=not turn_complete,
+                source_seqs=[*user_source_seqs, *assistant_source_seqs],
+            )
 
     return StreamingResponse(
         stream(),

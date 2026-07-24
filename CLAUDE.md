@@ -52,7 +52,7 @@ Centralized runtime safety, configured per-session via `HarnessConfig` (env defa
 - **`apply_llm_retry`**: exponential-backoff retry on transient provider errors. Order matters — call `bind_tools`/`with_structured_output` on the raw `BaseChatModel` **before** wrapping with retry, since retry returns a `Runnable`, not a `BaseChatModel`.
 - `recursion_limit` is *not* enforced here; it is passed to LangGraph at `astream()` time via `config={"recursion_limit": ...}`.
 
-Env knobs: `RECURSION_LIMIT`, `IDLE_TIMEOUT_SECONDS`, `PER_TOOL_TIMEOUT_SECONDS`, `MAX_TOOL_CALLS`, `MAX_TOKENS_BUDGET`, `LLM_MAX_RETRIES`, `TOOL_ALLOWLIST`, `TOOL_DENYLIST`.
+Env knobs: `RECURSION_LIMIT`, `IDLE_TIMEOUT_SECONDS`, `PER_TOOL_TIMEOUT_SECONDS`, `MAX_TOOL_CALLS`, `MAX_TOKENS_BUDGET`, `LLM_MAX_RETRIES`, `MEMORY_MAX_TOKENS`, `MEMORY_TARGET_TOKENS`, `MEMORY_KEEP_RECENT_TURNS`, `MEMORY_TTL_SECONDS`, `MEMORY_SWEEP_INTERVAL_SECONDS`, `TOOL_ALLOWLIST`, `TOOL_DENYLIST`.
 
 ### Skills (`agent/skills.py` + `skills/`)
 
@@ -60,9 +60,20 @@ Claude-Code-style progressive disclosure. Each skill is a folder with a `SKILL.m
 
 Existing skills: `text-stats`, `web-research` (Tavily — **the only path to web search**; it is intentionally *not* a top-level tool, so the model can't bypass the skill), `ppt` (writes `.pptx` into `generated/`).
 
+### Short-term memory (`memory/`)
+
+`MemoryManager` keeps model context bounded independently from full MySQL chat
+history. It retains a structured rolling summary plus recent complete turns,
+compresses at configurable token watermarks, and falls back to deterministic
+trimming if summarization fails. ReAct and plan-execute both consume this view;
+the latter receives it through `conversation_context` and keeps `past_steps`
+request-local. Successful summaries are persisted in `chat_summary` with their
+covered `chat_message.seq` range; reopening a conversation loads that snapshot
+plus only the uncovered text-message tail.
+
 ### Server (`server.py`)
 
-FastAPI with in-memory `sessions` dict (session_id → agent/mode/thread_id/harness/active_task). Streams responses as SSE (`text/event-stream`). Event types: `text`, `thinking`, `tool`, `plan`/`step`/`step_*` (plan-execute), `limit` (budget/idle/cancel/recursion/content_filter), `error`, `done`. Notable behavior:
+FastAPI with an in-memory `sessions` runtime cache (agent/mode/harness/memory/active_task). Idle sessions are evicted with a sliding TTL; full chat history remains in MySQL and rebuilds bounded memory when reopened. Streams responses as SSE (`text/event-stream`). Event types: `text`, `thinking`, `tool`, `plan`/`step`/`step_*` (plan-execute), `limit` (budget/idle/cancel/recursion/content_filter), `error`, `done`. Notable behavior:
 - **Idle timeout** caps the gap between two SSE events, not total duration — actively-streaming sessions never trip it.
 - DashScope content-moderation rejections (`data_inspection_failed`) are surfaced as a clean `limit`/`content_filter` event, not a raw error.
 - `/api/files/{filename}` serves generated artifacts from `generated/` with path-traversal guarding. `/api/title` best-effort-summarizes the first message into a sidebar title.

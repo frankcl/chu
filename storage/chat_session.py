@@ -186,12 +186,14 @@ def delete_conversation(session_id: str, user_id: str) -> bool:
         return False
     try:
         from storage.chat_message import ChatMessage
+        from storage.chat_summary import ChatSummary
 
         with session_scope(write=True) as s:
             conv = s.get(ChatSession, session_id)
             if conv is None or conv.user_id != user_id:
                 return False
             s.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+            s.query(ChatSummary).filter(ChatSummary.session_id == session_id).delete()
             s.delete(conv)
             return True
     except Exception:
@@ -205,6 +207,7 @@ def delete_user_history(user_id: str) -> list[str]:
         return []
     try:
         from storage.chat_message import ChatMessage
+        from storage.chat_summary import ChatSummary
 
         with session_scope(write=True) as s:
             session_ids = list(s.scalars(
@@ -212,6 +215,7 @@ def delete_user_history(user_id: str) -> list[str]:
             ).all())
             # 按 user_id 直接删消息（无需 join）；再删会话行。
             s.query(ChatMessage).filter(ChatMessage.user_id == user_id).delete()
+            s.query(ChatSummary).filter(ChatSummary.user_id == user_id).delete()
             s.query(ChatSession).filter(ChatSession.user_id == user_id).delete()
             return session_ids
     except Exception:
