@@ -2,6 +2,7 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
+from web_api import runtime
 
 from harness import HarnessConfig
 from memory import MemoryManager, MemorySnapshot, MemorySummary
@@ -198,7 +199,6 @@ def test_invalid_memory_config_is_rejected(kwargs):
 
 
 def test_runtime_eviction_skips_active_session():
-    import server
 
     cfg = HarnessConfig(memory_ttl_seconds=10)
     expired = {
@@ -210,10 +210,10 @@ def test_runtime_eviction_skips_active_session():
     }
     active_task = MagicMock(done=MagicMock(return_value=False))
     active = {**expired, "active_task": active_task, "memory": MagicMock()}
-    server.sessions.update({"expired": expired, "active": active})
+    runtime.sessions.update({"expired": expired, "active": active})
 
-    evicted = server._evict_idle_sessions(now=11.0)
+    evicted = runtime.evict_idle_sessions(now=11.0)
 
     assert evicted == ["expired"]
-    assert "expired" not in server.sessions
-    assert "active" in server.sessions
+    assert "expired" not in runtime.sessions
+    assert "active" in runtime.sessions

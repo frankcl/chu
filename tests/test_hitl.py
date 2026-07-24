@@ -10,6 +10,8 @@ import asyncio
 import json
 
 import pytest
+from web_api import chat as chat_api, runtime
+from web_api import sessions as sessions_api
 from fastapi import HTTPException
 from unittest.mock import MagicMock, patch
 
@@ -187,8 +189,7 @@ def _mock_agent_driving_channel(mode: str):
     test can assert the stream resumed with the answer.
     """
     async def fake_astream(*args, **kwargs):
-        import server
-        channel = next(iter(server.sessions.values()))["hitl"]
+        channel = next(iter(runtime.sessions.values()))["hitl"]
         choice = await channel.request("请选择 PPT 模板风格", ["default", "tech-dark"])
         if mode == "react":
             from langchain_core.messages import AIMessageChunk
@@ -215,22 +216,21 @@ async def _run_hitl_chat(mode: str, choice: str):
     whole response, so it can't deliver a mid-stream event while the generator is
     parked awaiting the human answer.
     """
-    import server
 
     agent = _mock_agent_driving_channel(mode)
     patch_target = (
-        "server.create_agent" if mode == "react" else "server.create_plan_execute_agent"
+        "web_api.runtime.create_agent" if mode == "react" else "web_api.runtime.create_plan_execute_agent"
     )
     with patch(patch_target, return_value=agent):
-        sid = server.create_session(server.SessionRequest(mode=mode))["session_id"]
-        resp = await server.chat(sid, server.ChatRequest(message="做个PPT"))
+        sid = sessions_api.create_session(sessions_api.SessionRequest(mode=mode))["session_id"]
+        resp = await chat_api.chat(sid, chat_api.ChatRequest(message="做个PPT"))
         events = []
         async for raw in resp.body_iterator:
             ev = _decode_sse(raw)
             events.append(ev)
             if ev.get("type") == "hitl":
                 # Resolve the parked request; the next iteration resumes the stream.
-                assert server.sessions[sid]["hitl"].respond(ev["id"], choice) is True
+                assert runtime.sessions[sid]["hitl"].respond(ev["id"], choice) is True
             elif ev.get("type") == "done":
                 break
     return events
@@ -260,7 +260,6 @@ class TestServerHitlFlow:
         assert "done" in types
 
     def test_respond_unknown_session_404(self):
-        import server
         with pytest.raises(HTTPException) as exc:
-            server.respond_chat("nope", server.RespondRequest(id="x", value="y"))
+            chat_api.respond_chat("nope", chat_api.RespondRequest(id="x", value="y"))
         assert exc.value.status_code == 404

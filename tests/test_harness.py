@@ -8,6 +8,7 @@ import pytest
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
+from web_api import auth, runtime
 
 from harness import (
     BudgetExceededError,
@@ -261,13 +262,13 @@ def client():
 
     mock_agent.astream = _empty_astream
     with (
-        patch("server.create_agent", return_value=mock_agent),
-        patch("server.create_plan_execute_agent", return_value=mock_agent),
+        patch("web_api.runtime.create_agent", return_value=mock_agent),
+        patch("web_api.runtime.create_plan_execute_agent", return_value=mock_agent),
     ):
         import server
-        from server import sessions
+        from web_api.runtime import sessions
         # hylian shield (Bearer-first branch) protects /api/*: stub get_user + send a bearer token.
-        with patch.object(server.hylian_client, "get_user", return_value=MagicMock()):
+        with patch.object(auth.hylian_client, "get_user", return_value=MagicMock()):
             with TestClient(
                 server.app,
                 raise_server_exceptions=False,
@@ -292,7 +293,6 @@ class TestCancelEndpoint:
 
     def test_cancel_with_active_task_cancels_it(self, client):
         """Inject a fake long-running task into the session and verify /cancel kills it."""
-        import server
 
         sid = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
 
@@ -303,7 +303,7 @@ class TestCancelEndpoint:
 
         try:
             task = loop.create_task(long_task())
-            server.sessions[sid]["active_task"] = task
+            runtime.sessions[sid]["active_task"] = task
             loop.run_until_complete(asyncio.sleep(0))  # let task start
 
             resp = client.post(f"/api/chat/{sid}/cancel")
@@ -323,7 +323,6 @@ class TestCancelEndpoint:
 
 class TestSessionHarnessOverrides:
     def test_override_stored_on_session(self, client):
-        import server
         resp = client.post("/api/sessions", json={
             "mode": "react",
             "max_tool_calls": 1,
@@ -333,7 +332,7 @@ class TestSessionHarnessOverrides:
             "tool_denylist": ["python_repl"],
         })
         sid = resp.json()["session_id"]
-        cfg = server.sessions[sid]["harness"]
+        cfg = runtime.sessions[sid]["harness"]
         assert cfg.max_tool_calls == 1
         assert cfg.max_tool_calls_per_task == 2
         assert cfg.max_skill_script_calls_per_task == 3
@@ -341,10 +340,9 @@ class TestSessionHarnessOverrides:
         assert "python_repl" in cfg.tool_denylist
 
     def test_none_overrides_keep_env_defaults(self, client):
-        import server
         resp = client.post("/api/sessions", json={"mode": "react"})
         sid = resp.json()["session_id"]
-        cfg = server.sessions[sid]["harness"]
+        cfg = runtime.sessions[sid]["harness"]
         assert cfg.recursion_limit == 25
 
 
@@ -361,14 +359,14 @@ class TestIdleTimeoutBehavior:
         mock_agent = MagicMock()
         mock_agent.astream = fake_astream
         ctx = (
-            patch("server.create_agent", return_value=mock_agent),
-            patch("server.create_plan_execute_agent", return_value=mock_agent),
+            patch("web_api.runtime.create_agent", return_value=mock_agent),
+            patch("web_api.runtime.create_plan_execute_agent", return_value=mock_agent),
         )
         for c in ctx:
             c.start()
         import server
         # hylian shield (Bearer-first branch) protects /api/*: stub get_user + send a bearer token.
-        gu = patch.object(server.hylian_client, "get_user", return_value=MagicMock())
+        gu = patch.object(auth.hylian_client, "get_user", return_value=MagicMock())
         gu.start()
         client = TestClient(
             server.app,

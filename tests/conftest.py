@@ -42,7 +42,7 @@ os.environ["MYSQL_DATABASE"] = ""
 
 
 # ---------------------------------------------------------------------------
-# server.sessions is a module-level dict. Each test that creates a session
+# web_api.runtime.sessions is a module-level dict. Each test that creates a session
 # adds an entry (with a compiled mock agent + MemoryManager + active_task slot).
 # Without per-test cleanup it grows monotonically across
 # the whole suite — visible as "memory keeps climbing" when running pytest.
@@ -67,17 +67,14 @@ def _no_real_db():
 def _clear_server_sessions_after_test():
     yield
     try:
-        import sys
-        server = sys.modules.get("server")
-        if server is not None:
-            sessions = getattr(server, "sessions", None)
-            if sessions:
-                # cancel any leftover active tasks before dropping refs
-                for s in list(sessions.values()):
-                    task = s.get("active_task") if isinstance(s, dict) else None
-                    if task is not None and not task.done():
-                        task.cancel()
-                sessions.clear()
+        from web_api.runtime import sessions
+        if sessions:
+            # cancel any leftover active tasks before dropping refs
+            for s in list(sessions.values()):
+                task = s.get("active_task") if isinstance(s, dict) else None
+                if task is not None and not task.done():
+                    task.cancel()
+            sessions.clear()
     except Exception:
         pass
     # Force a GC pass — MagicMock trees, langchain RunnableConfig contexts and

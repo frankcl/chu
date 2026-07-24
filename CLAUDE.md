@@ -71,9 +71,9 @@ request-local. Successful summaries are persisted in `chat_summary` with their
 covered `chat_message.seq` range; reopening a conversation loads that snapshot
 plus only the uncovered text-message tail.
 
-### Server (`server.py`)
+### Web API (`web_api/`, exposed by `server.py`)
 
-FastAPI with an in-memory `sessions` runtime cache (agent/mode/harness/memory/active_task). Idle sessions are evicted with a sliding TTL; full chat history remains in MySQL and rebuilds bounded memory when reopened. Streams responses as SSE (`text/event-stream`). Event types: `text`, `thinking`, `tool`, `plan`/`step`/`step_*` (plan-execute), `limit` (budget/idle/cancel/recursion/content_filter), `error`, `done`. Notable behavior:
+`server.py` is the compatibility ASGI entrypoint; application assembly and business routers live in `web_api`. `web_api/runtime.py` owns the in-memory `sessions` cache (agent/mode/harness/memory/active_task). Idle sessions are evicted with a sliding TTL; full chat history remains in MySQL and rebuilds bounded memory when reopened. The chat router streams responses as SSE (`text/event-stream`). Event types: `text`, `thinking`, `tool`, `plan`/`step`/`step_*` (plan-execute), `limit` (budget/idle/cancel/recursion/content_filter), `error`, `done`. Notable behavior:
 - **Idle timeout** caps the gap between two SSE events, not total duration — actively-streaming sessions never trip it.
 - DashScope content-moderation rejections (`data_inspection_failed`) are surfaced as a clean `limit`/`content_filter` event, not a raw error.
 - `/api/files/{filename}` serves generated artifacts from `generated/` with path-traversal guarding. `/api/title` best-effort-summarizes the first message into a sidebar title.
@@ -82,7 +82,7 @@ Builtin tools (`agent/tools.py`): `python_repl`, `get_current_time`, `get_curren
 
 ### Tests (`tests/`)
 
-`conftest.py` sets dummy provider API keys **before** any agent import (constructors validate key presence), disables langsmith tracing, and clears `server.sessions` + forces GC after each test to keep RSS flat. Tests mock the LLM rather than hitting providers.
+`conftest.py` sets dummy provider API keys **before** any agent import (constructors validate key presence), disables langsmith tracing, and clears `web_api.runtime.sessions` + forces GC after each test to keep RSS flat. Endpoint tests mirror the business modules under `tests/web_api/`; its local `conftest.py` provides the authenticated TestClient and mock agents. Tests mock the LLM rather than hitting providers.
 
 ## Conventions
 
