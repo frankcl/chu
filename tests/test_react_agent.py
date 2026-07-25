@@ -183,6 +183,26 @@ class TestCreateAgent:
         result = agent.invoke({"messages": [("human", "capital of France?")]})
         assert "Paris" in result["messages"][-1].content
 
+    def test_memory_summary_keeps_single_system_message(self, mocker):
+        from langchain_core.messages import SystemMessage
+        from memory import MemoryManager, MemorySummary
+
+        mock_llm, mock_bound = self._make_mock_llm()
+        mocker.patch("agent.llm.LLM.chat_model", return_value=mock_llm)
+        from agent.react_agent import create_agent
+
+        memory = MemoryManager()
+        memory.summary = MemorySummary(key_facts=["saved fact"])
+        memory.commit_turn("recent question", "recent answer")
+        agent = create_agent(system_prompt="stable system")
+
+        agent.invoke({"messages": memory.prepare_messages("current question")})
+
+        sent_messages = mock_bound.invoke.call_args.args[0]
+        assert sum(isinstance(message, SystemMessage) for message in sent_messages) == 1
+        assert sent_messages[0].content.startswith("stable system")
+        assert "<conversation_memory>" in sent_messages[1].content
+
     async def test_astream_emits_model_chunks_as_custom_events(self, mocker):
         from langchain_core.messages import AIMessage, AIMessageChunk
 

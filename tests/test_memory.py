@@ -109,9 +109,38 @@ async def test_large_memory_summarizes_old_turns_and_keeps_recent(caplog):
     assert f"memory compact starting tokens_before={tokens_before}" in caplog.text
     assert manager.summary.key_facts == ["早期关键信息"]
     assert len(manager.turns) <= 2
-    assert messages[0].type == "system"
+    assert messages[0].type == "human"
+    assert messages[0].content.startswith("<conversation_memory>\n")
+    assert "早期关键信息" in messages[0].content
     assert messages[-1].content == "新问题"
     assert manager.estimate_tokens("新问题") <= manager.config.memory_target_tokens
+
+
+def test_summary_is_prepended_to_first_recent_user_without_mutating_turn():
+    manager = MemoryManager(_config())
+    manager.summary = MemorySummary(key_facts=["较早事实"])
+    manager.commit_turn("近期问题", "近期回答")
+
+    first = manager.prepare_messages("当前问题")
+    second = manager.prepare_messages("另一个问题")
+
+    assert [message.type for message in first] == ["human", "ai", "human"]
+    assert first[0].content.startswith("<conversation_memory>\n")
+    assert first[0].content.endswith("\n\n近期问题")
+    assert first[-1].content == "当前问题"
+    assert second[0].content.count("<conversation_memory>") == 1
+    assert manager.turns[0].user == "近期问题"
+
+
+def test_summary_is_prepended_to_current_user_when_no_recent_user_exists():
+    manager = MemoryManager(_config())
+    manager.summary = MemorySummary(key_facts=["较早事实"])
+
+    messages = manager.prepare_messages("当前问题")
+
+    assert [message.type for message in messages] == ["human"]
+    assert messages[0].content.startswith("<conversation_memory>\n")
+    assert messages[0].content.endswith("\n\n当前问题")
 
 
 @pytest.mark.asyncio
