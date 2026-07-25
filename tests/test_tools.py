@@ -20,19 +20,15 @@ def _fake_urlopen(response_data: dict):
 # ── get_current_time ─────────────────────────────────────────────────────────
 
 class TestGetCurrentTime:
-    def test_returns_formatted_string(self):
-        from agent.tools import get_current_time
-        result = get_current_time.invoke({})
-        # Should match "YYYY-MM-DD HH:MM:SS TZ"
-        import re
-        assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", result)
-
-    def test_contains_date_components(self):
-        from agent.tools import get_current_time
+    def test_returns_current_formatted_time(self):
         from datetime import datetime
+        import re
+
+        from agent.tools import get_current_time
+
         result = get_current_time.invoke({})
-        today = datetime.now().strftime("%Y-%m-%d")
-        assert today in result
+        assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", result)
+        assert datetime.now().strftime("%Y-%m-%d") in result
 
 
 # ── get_current_location ─────────────────────────────────────────────────────
@@ -119,12 +115,14 @@ class TestReadFile:
 
 
 class TestWriteFile:
-    def test_creates_file(self, tmp_path):
+    def test_creates_file_and_reports_path(self, tmp_path):
         from agent.tools import write_file
+
         path = str(tmp_path / "out.txt")
         result = write_file.invoke({"path": path, "content": "data"})
         assert "Successfully written" in result
-        assert open(path).read() == "data"
+        assert path in result
+        assert (tmp_path / "out.txt").read_text() == "data"
 
     def test_overwrites_existing_file(self, tmp_path):
         from agent.tools import write_file
@@ -133,29 +131,20 @@ class TestWriteFile:
         write_file.invoke({"path": str(f), "content": "new content"})
         assert f.read_text() == "new content"
 
-    def test_return_includes_path(self, tmp_path):
-        from agent.tools import write_file
-        path = str(tmp_path / "result.txt")
-        result = write_file.invoke({"path": path, "content": "x"})
-        assert path in result
-
-
 # ── get_builtin_tools ─────────────────────────────────────────────────────────
 
 class TestGetBuiltinTools:
-    def test_returns_non_empty_list(self):
+    def test_returns_expected_described_tools(self):
         from agent.tools import get_builtin_tools
+
         tools = get_builtin_tools()
         assert isinstance(tools, list)
-        assert len(tools) > 0
-
-    def test_contains_expected_tool_names(self):
-        from agent.tools import get_builtin_tools
-        names = {t.name for t in get_builtin_tools()}
-        for expected in ("get_current_time", "get_current_location", "get_weather", "read_file", "write_file"):
-            assert expected in names
-
-    def test_all_have_description(self):
-        from agent.tools import get_builtin_tools
-        for t in get_builtin_tools():
+        assert {
+            "get_current_time",
+            "get_current_location",
+            "get_weather",
+            "read_file",
+            "write_file",
+        } <= {tool.name for tool in tools}
+        for t in tools:
             assert t.description, f"Tool '{t.name}' has no description"

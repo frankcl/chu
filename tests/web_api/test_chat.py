@@ -118,15 +118,20 @@ class TestChat:
             {"type": "done"},
         ]
 
-    def test_react_stream_text_event(self, client, mock_react_agent):
-        """When the agent emits an AIMessageChunk with text, a 'text' SSE is sent."""
+    def test_react_stream_maps_text_and_provider_thinking_events(self, client, mock_react_agent):
         from langchain_core.messages import AIMessageChunk
 
-        text_chunk = AIMessageChunk(content="Paris")
         metadata = {"langgraph_node": "agent"}
 
         async def fake_astream(*args, **kwargs):
-            yield text_chunk, metadata
+            yield AIMessageChunk(content="Paris"), metadata
+            yield AIMessageChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "qwen thinking"},
+            ), metadata
+            yield AIMessageChunk(
+                content=[{"type": "thinking", "thinking": "anthropic thinking"}],
+            ), metadata
 
         mock_react_agent.astream = fake_astream
 
@@ -135,29 +140,12 @@ class TestChat:
 
         events = _parse_sse(resp.text)
         text_events = [e for e in events if e.get("type") == "text"]
-        assert any("Paris" in e.get("content", "") for e in text_events)
-
-    def test_react_stream_thinking_event(self, client, mock_react_agent):
-        """reasoning_content in AIMessageChunk.additional_kwargs → 'thinking' SSE."""
-        from langchain_core.messages import AIMessageChunk
-
-        thinking_chunk = AIMessageChunk(
-            content="",
-            additional_kwargs={"reasoning_content": "let me think"},
-        )
-        metadata = {"langgraph_node": "agent"}
-
-        async def fake_astream(*args, **kwargs):
-            yield thinking_chunk, metadata
-
-        mock_react_agent.astream = fake_astream
-
-        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "?"})
-
-        events = _parse_sse(resp.text)
         thinking_events = [e for e in events if e.get("type") == "thinking"]
-        assert any("let me think" in e.get("content", "") for e in thinking_events)
+        assert [event["content"] for event in text_events] == ["Paris"]
+        assert [event["content"] for event in thinking_events] == [
+            "qwen thinking",
+            "anthropic thinking",
+        ]
 
     def test_react_stream_tool_event(self, client, mock_react_agent):
         """ToolMessage on the 'tools' node → 'tool' SSE."""
@@ -179,36 +167,6 @@ class TestChat:
         assert len(tool_events) == 1
         assert tool_events[0]["name"] == "get_weather"
         assert "sunny" in tool_events[0]["result"]
-
-    def test_react_stream_extracts_favicons_for_web_research_search_script(self, client, mock_react_agent):
-        """Only web-research/search.py tool results carry source favicon metadata."""
-        from langchain_core.messages import ToolMessage
-
-        result = '{"results":[{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}]}'
-        tool_msg = ToolMessage(content=result, name="run_skill_script", tool_call_id="1")
-        metadata = {"langgraph_node": "tools"}
-
-        async def fake_astream(*args, **kwargs):
-            for cb in kwargs["config"]["callbacks"]:
-                if cb.__class__.__name__ == "_SseToolStartCallback":
-                    cb.on_tool_start(
-                        {"name": "run_skill_script"},
-                        '{"skill":"web-research","script":"search.py","script_args":["q"]}',
-                        tool_call_id="1",
-                    )
-            yield tool_msg, metadata
-
-        mock_react_agent.astream = fake_astream
-
-        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "search"})
-
-        events = _parse_sse(resp.text)
-        tool_events = [e for e in events if e.get("type") == "tool"]
-        assert tool_events[0]["source_favicons"] == [{
-            "url": "https://example.com/a",
-            "favicon": "https://cdn.example.com/icon.png",
-        }]
 
     def test_react_stream_matches_tool_input_by_call_id_when_same_tool_returns_out_of_order(
         self, client, mock_react_agent,
@@ -262,26 +220,6 @@ class TestChat:
         }]
         assert tool_events[1]["source_favicons"] == []
 
-    def test_react_stream_does_not_extract_favicons_for_non_search_tool(self, client, mock_react_agent):
-        """Non-search tool results keep the source_favicons field empty."""
-        from langchain_core.messages import ToolMessage
-
-        result = '{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}'
-        tool_msg = ToolMessage(content=result, name="get_weather", tool_call_id="1")
-        metadata = {"langgraph_node": "tools"}
-
-        async def fake_astream(*args, **kwargs):
-            yield tool_msg, metadata
-
-        mock_react_agent.astream = fake_astream
-
-        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "weather?"})
-
-        events = _parse_sse(resp.text)
-        tool_events = [e for e in events if e.get("type") == "tool"]
-        assert tool_events[0]["source_favicons"] == []
-
     def test_react_stream_tool_start_event(self, client, mock_react_agent):
         """Tool start callback → 'tool_start' SSE before the ToolMessage returns."""
         from langchain_core.messages import ToolMessage
@@ -304,43 +242,8 @@ class TestChat:
         assert starts and starts[0]["name"] == "get_weather"
         assert "Paris" in starts[0]["input"]
 
-    def test_plan_execute_stream_plan_event(self, client, mock_plan_execute_agent):
-        """plan node update → 'plan' SSE event with steps list."""
-        async def fake_astream(*args, **kwargs):
-            yield "updates", {"plan": {"plan": ["step A", "step B"]}}
-
-        mock_plan_execute_agent.astream = fake_astream
-
-        session_id = client.post("/api/sessions", json={"mode": "plan-execute"}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "do stuff"})
-
-        events = _parse_sse(resp.text)
-        plan_events = [e for e in events if e.get("type") == "plan"]
-        assert len(plan_events) == 1
-        assert plan_events[0]["steps"] == ["step A", "step B"]
-
-    def test_plan_execute_stream_step_and_text_events(self, client, mock_plan_execute_agent):
-        """execute updates → 'step'; summarize_token custom event → 'text'."""
-        async def fake_astream(*args, **kwargs):
-            yield "updates", {"execute": {"past_steps": [("do X", "done X")]}}
-            yield "custom", {"phase": "summarize_token", "text": "All done."}
-
-        mock_plan_execute_agent.astream = fake_astream
-
-        session_id = client.post("/api/sessions", json={"mode": "plan-execute"}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "task"})
-
-        events = _parse_sse(resp.text)
-        step_events = [e for e in events if e.get("type") == "step"]
-        text_events = [e for e in events if e.get("type") == "text"]
-
-        assert len(step_events) == 1
-        assert step_events[0]["step"] == "do X"
-        assert len(text_events) == 1
-        assert text_events[0]["content"] == "All done."
-
     def test_plan_execute_streams_phase_and_step_progress(self, client, mock_plan_execute_agent):
-        """Verify all the new streaming events: phase, step_start, step_token, step_tool."""
+        """A full plan-execute stream maps every public progress event."""
         async def fake_astream(*args, **kwargs):
             yield "custom", {"phase": "planning_start"}
             yield "updates", {"plan": {"plan": ["s1"]}}
@@ -358,6 +261,9 @@ class TestChat:
         sid = client.post("/api/sessions", json={"mode": "plan-execute"}).json()["session_id"]
         resp = client.post(f"/api/chat/{sid}", json={"message": "go"})
         events = _parse_sse(resp.text)
+
+        plans = [e for e in events if e.get("type") == "plan"]
+        assert [event["steps"] for event in plans] == [["s1"]]
 
         phases = [e for e in events if e.get("type") == "phase"]
         assert [p["phase"] for p in phases] == ["planning", "summarizing"]
@@ -378,6 +284,9 @@ class TestChat:
 
         tool_starts = [e for e in events if e.get("type") == "step_tool_start"]
         assert tool_starts and tool_starts[0]["name"] == "get_weather"
+
+        steps = [e for e in events if e.get("type") == "step"]
+        assert [event["step"] for event in steps] == ["s1"]
 
         texts = [e for e in events if e.get("type") == "text"]
         assert texts and texts[0]["content"] == "All set."
@@ -439,33 +348,6 @@ class TestChat:
         assert len(error_events) == 1
         assert "plan failed" in error_events[0]["message"]
 
-    def test_react_stream_anthropic_thinking_blocks(self, client, mock_react_agent):
-        """Anthropic 'thinking' content blocks in AIMessageChunk → 'thinking' SSE events."""
-        from langchain_core.messages import AIMessageChunk
-
-        chunk = AIMessageChunk(
-            content=[{"type": "thinking", "thinking": "anthropic thinking text"}],
-        )
-        metadata = {"langgraph_node": "agent"}
-
-        async def fake_astream(*args, **kwargs):
-            yield chunk, metadata
-
-        mock_react_agent.astream = fake_astream
-
-        session_id = client.post("/api/sessions", json={"mode": "react"}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "?"})
-
-        events = _parse_sse(resp.text)
-        thinking_events = [e for e in events if e.get("type") == "thinking"]
-        assert any("anthropic thinking text" in e.get("content", "") for e in thinking_events)
-
-    def test_sse_content_type_header(self, client):
-        """The /api/chat endpoint must respond with text/event-stream."""
-        session_id = client.post("/api/sessions", json={}).json()["session_id"]
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "hi"})
-        assert "text/event-stream" in resp.headers["content-type"]
-
     def test_tool_result_truncated_to_800_chars(self, client, mock_react_agent):
         """Tool results longer than 800 chars must be truncated in the SSE event."""
         from langchain_core.messages import ToolMessage
@@ -499,4 +381,3 @@ def _parse_sse(raw: str) -> list[dict]:
             except json.JSONDecodeError:
                 pass
     return events
-

@@ -3,15 +3,11 @@
 import logging
 
 
-def test_get_logger_returns_correct_name():
+def test_get_logger_returns_standard_logger_with_requested_name():
     from logger import get_logger
+
     logger = get_logger("my_module")
     assert logger.name == "my_module"
-
-
-def test_get_logger_is_standard_logger():
-    from logger import get_logger
-    logger = get_logger("test_logger")
     assert isinstance(logger, logging.Logger)
 
 
@@ -22,8 +18,6 @@ def test_setup_logging_is_idempotent():
     # Reset the module-level flag so we can test fresh
     original = log_module._initialized
     log_module._initialized = False
-    root_before = len(logging.getLogger().handlers)
-
     log_module.setup_logging()
     handlers_after_first = len(logging.getLogger().handlers)
 

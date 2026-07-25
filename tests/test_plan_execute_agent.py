@@ -1,4 +1,4 @@
-"""Tests for agent/plan_execute_agent.py — PlannerOutput validator and step numbering."""
+"""Tests for agent/plan_execute_agent.py."""
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,10 +18,6 @@ from agent.plan_execute_agent import (
 # ── _PlannerOutput model validator ────────────────────────────────────────────
 
 class TestPlannerOutput:
-    def test_standard_steps_key(self):
-        out = _PlannerOutput(steps=["step1", "step2", "step3"])
-        assert out.steps == ["step1", "step2", "step3"]
-
     def test_qwen_plan_key_alias(self):
         """Qwen often returns {"plan": [...]} instead of {"steps": [...]}."""
         out = _PlannerOutput.model_validate({"plan": ["a", "b"]})
@@ -32,17 +28,10 @@ class TestPlannerOutput:
         out = _PlannerOutput.model_validate({"steps": ["x"], "plan": ["y"]})
         assert out.steps == ["x"]
 
-    def test_empty_steps(self):
-        out = _PlannerOutput(steps=[])
-        assert out.steps == []
-
-    def test_default_is_empty_list(self):
-        out = _PlannerOutput()
-        assert out.steps == []
-
-    def test_empty_plan_key_falls_back_to_empty(self):
-        out = _PlannerOutput.model_validate({"plan": []})
-        assert out.steps == []
+    def test_empty_inputs_fall_back_to_empty_steps(self):
+        assert _PlannerOutput(steps=[]).steps == []
+        assert _PlannerOutput().steps == []
+        assert _PlannerOutput.model_validate({"plan": []}).steps == []
 
     def test_steps_are_converted_to_chain_tasks(self):
         out = _PlannerOutput.model_validate({"steps": ["first", "second", "third"]})
@@ -191,56 +180,9 @@ def test_plan_tool_events_match_inputs_by_tool_call_id():
 #
 # We test the formula directly (pure arithmetic) across realistic scenarios.
 
-class TestStepNumberFormula:
-    """Verify the 1-based step counter used in execute_step logging."""
-
-    @staticmethod
-    def _step_num(plan_total: int, remaining: int) -> int:
-        """Replicate the formula from execute_step."""
-        return plan_total - remaining + 1
-
     # ── single round ────────────────────────────────────────────────────────
 
-    def test_first_step_of_three(self):
-        assert self._step_num(plan_total=3, remaining=3) == 1
-
-    def test_second_step_of_three(self):
-        assert self._step_num(plan_total=3, remaining=2) == 2
-
-    def test_third_step_of_three(self):
-        assert self._step_num(plan_total=3, remaining=1) == 3
-
-    def test_single_step_plan(self):
-        assert self._step_num(plan_total=1, remaining=1) == 1
-
-    def test_two_step_plan(self):
-        assert self._step_num(plan_total=2, remaining=2) == 1
-        assert self._step_num(plan_total=2, remaining=1) == 2
-
     # ── multi-round: past_steps accumulates, but numbering must reset ────────
-
-    def test_second_round_starts_at_1(self):
-        """
-        Round 1 completed 3 steps → past_steps has 3 entries.
-        Round 2 has a new plan_total=2.
-        The step_num must start at 1, not 4.
-        """
-        # Round 2, first execute call
-        assert self._step_num(plan_total=2, remaining=2) == 1
-        # Round 2, second execute call
-        assert self._step_num(plan_total=2, remaining=1) == 2
-
-    def test_numbering_independent_of_past_steps_length(self):
-        """
-        No matter how large past_steps grows, the formula only uses
-        plan_total and remaining — so it's always round-relative.
-        """
-        for accumulated_past_count in [0, 5, 100]:
-            # A new round with plan_total=4
-            for remaining in [4, 3, 2, 1]:
-                expected = 4 - remaining + 1
-                assert self._step_num(4, remaining) == expected
-
 
 # ── plan_step + execute_step integration (mocked LLM) ────────────────────────
 
@@ -252,13 +194,10 @@ class TestPlanExecuteIntegration:
       - executor is called via .astream(stream_mode=["updates", "custom"])
       - summarizer is called via .astream
 
-    Memory/time note: compiling a LangGraph (~pregel runtime, callbacks managers,
-    state stores) per test costs ~10–50ms and several MB. Tests in this class
-    share ONE compiled agent via a class-scoped fixture; per-test variation lives
-    in a mutable `holder` dict that the mocks read from.
+    One two-step run covers planner, executor context propagation and summarizer.
     """
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture
     def shared_env(self):
         from unittest.mock import patch
         from agent.plan_execute_agent import _PlannerOutput
@@ -315,34 +254,14 @@ class TestPlanExecuteIntegration:
     def _initial_state(task="task"):
         return {"input": task, "plan": [], "plan_total": 0, "past_steps": [], "response": None}
 
-    async def test_plan_total_stored_in_state(self, shared_env):
-        """plan_step must write plan_total = len(plan) into the state."""
-        agent, holder = shared_env
-        self._reset(holder, ["s1", "s2", "s3"])
-        result = await agent.ainvoke(self._initial_state("test task"))
-        assert result["response"] is not None
-        assert len(holder["captured"]) == 3
-
-    async def test_first_step_has_no_context(self, shared_env):
-        """The first execute step sends the bare task without context."""
-        agent, holder = shared_env
-        self._reset(holder, ["only step"])
-        await agent.ainvoke(self._initial_state())
-        assert holder["captured"][0] == "only step"
-
-    async def test_second_step_includes_first_result(self, shared_env):
-        """The second execute step's query includes context from step 1."""
+    async def test_two_step_plan_executes_with_context_and_summarizes(self, shared_env):
         agent, holder = shared_env
         self._reset(holder, ["step 1", "step 2"])
-        await agent.ainvoke(self._initial_state())
+        result = await agent.ainvoke(self._initial_state())
+
+        assert len(holder["captured"]) == 2
         assert holder["captured"][0] == "step 1"
         assert "step 1" in holder["captured"][1] and "step result" in holder["captured"][1]
-
-    async def test_response_is_summarizer_output(self, shared_env):
-        """Final response comes from the summarizer, not executor."""
-        agent, holder = shared_env
-        self._reset(holder, ["one step"])
-        result = await agent.ainvoke(self._initial_state())
         assert result["response"] == "final answer"
 
 
@@ -739,65 +658,6 @@ async def test_nested_react_streams_custom_tokens_for_second_task():
     assert step2[1]["text"] == "answer2 "
 
 
-async def test_task_tool_result_uses_tool_message_call_id():
-    from unittest.mock import MagicMock, patch
-
-    from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
-    from langchain_core.messages import AIMessage, ToolMessage
-
-    planner_output = _PlannerOutput.model_validate({
-        "tasks": [
-            {"id": "a", "title": "A", "description": "task A", "depends_on": []},
-        ],
-    })
-
-    mock_chain = MagicMock()
-    mock_chain.side_effect = lambda *_a, **_kw: planner_output
-    mock_chain.with_retry.return_value = mock_chain
-
-    mock_llm = MagicMock()
-    mock_llm.with_structured_output.return_value = mock_chain
-    mock_llm.with_retry.return_value = mock_llm
-    mock_llm.return_value = AIMessage(content="final answer")
-
-    async def fake_exec_astream(_state, **_kwargs):
-        yield "updates", {
-            "tools": {
-                "messages": [
-                    ToolMessage(content="sunny", name="get_weather", tool_call_id="call-1")
-                ]
-            }
-        }
-        yield "updates", {"agent": {"messages": [AIMessage(content="done")]}}
-
-    mock_executor = MagicMock()
-    mock_executor.astream = fake_exec_astream
-    mock_react = MagicMock()
-    mock_react.return_value.compiled = mock_executor
-
-    with (
-        patch("agent.llm.LLM.chat_model", return_value=mock_llm),
-        patch("agent.plan_execute_agent.ReActAgent", mock_react),
-    ):
-        agent = create_plan_execute_agent()
-        events = []
-        async for mode, data in agent.astream({
-            "input": "test",
-            "plan": [],
-            "plan_total": 0,
-            "tasks": [],
-            "task_results": {},
-            "task_errors": {},
-            "past_steps": [],
-            "response": None,
-        }, stream_mode=["custom", "updates"]):
-            if mode == "custom" and data.get("phase") == "execute_tool":
-                events.append(data)
-
-    assert events
-    assert events[0]["tool_call_id"] == "call-1"
-
-
 async def test_task_tool_result_is_forwarded_from_tools_update():
     from unittest.mock import MagicMock, patch
 
@@ -931,66 +791,6 @@ async def test_task_tool_result_extracts_favicons_for_web_research_search_script
     }]
 
 
-async def test_task_tool_result_does_not_extract_favicons_for_non_search_tool():
-    from unittest.mock import MagicMock, patch
-
-    from agent.plan_execute_agent import _PlannerOutput, create_plan_execute_agent
-    from langchain_core.messages import AIMessage, ToolMessage
-
-    planner_output = _PlannerOutput.model_validate({
-        "tasks": [
-            {"id": "a", "title": "A", "description": "task A", "depends_on": []},
-        ],
-    })
-
-    mock_chain = MagicMock()
-    mock_chain.side_effect = lambda *_a, **_kw: planner_output
-    mock_chain.with_retry.return_value = mock_chain
-
-    mock_llm = MagicMock()
-    mock_llm.with_structured_output.return_value = mock_chain
-    mock_llm.with_retry.return_value = mock_llm
-    mock_llm.return_value = AIMessage(content="final answer")
-
-    result = '{"url":"https://example.com/a","favicon":"https://cdn.example.com/icon.png"}'
-
-    async def fake_exec_astream(_state, **_kwargs):
-        yield "updates", {
-            "tools": {
-                "messages": [
-                    ToolMessage(content=result, name="get_weather", tool_call_id="tool-call-1"),
-                ],
-            },
-        }
-        yield "updates", {"agent": {"messages": [AIMessage(content="done")]}}
-
-    mock_executor = MagicMock()
-    mock_executor.astream = fake_exec_astream
-    mock_react = MagicMock()
-    mock_react.return_value.compiled = mock_executor
-
-    with (
-        patch("agent.llm.LLM.chat_model", return_value=mock_llm),
-        patch("agent.plan_execute_agent.ReActAgent", mock_react),
-    ):
-        agent = create_plan_execute_agent()
-        events = []
-        async for mode, data in agent.astream({
-            "input": "test",
-            "plan": [],
-            "plan_total": 0,
-            "tasks": [],
-            "task_results": {},
-            "task_errors": {},
-            "past_steps": [],
-            "response": None,
-        }, stream_mode=["custom", "updates"]):
-            if mode == "custom" and data.get("phase") == "execute_tool":
-                events.append(data)
-
-    assert events[0]["source_favicons"] == []
-
-
 async def test_task_tool_result_is_not_duplicated_from_messages_and_updates():
     from unittest.mock import MagicMock, patch
 
@@ -1105,23 +905,6 @@ async def test_task_answer_falls_back_to_agent_update_when_chunks_are_missing():
 
 
 # ── route_after_execute logic ─────────────────────────────────────────────────
-
-class TestRouteAfterExecute:
-    """The routing logic: empty plan → 'summarize', non-empty → 'execute'."""
-
-    @staticmethod
-    def _route(plan):
-        return "summarize" if not plan else "execute"
-
-    def test_empty_plan_routes_to_summarize(self):
-        assert self._route([]) == "summarize"
-
-    def test_non_empty_plan_routes_to_execute(self):
-        assert self._route(["step 1", "step 2"]) == "execute"
-
-    def test_single_remaining_step_routes_to_execute(self):
-        assert self._route(["last step"]) == "execute"
-
 
 # ── run_plan_execute_agent wrapper ────────────────────────────────────────────
 

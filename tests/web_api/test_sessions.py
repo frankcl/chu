@@ -2,16 +2,10 @@
 
 
 class TestCreateSession:
-    def test_returns_session_id_and_mode(self, client):
-        resp = client.post("/api/sessions", json={"mode": "react"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "session_id" in data
-        assert data["mode"] == "react"
-
-    def test_default_mode_is_react(self, client):
+    def test_returns_session_id_with_default_react_mode(self, client):
         resp = client.post("/api/sessions", json={})
         assert resp.status_code == 200
+        assert resp.json()["session_id"]
         assert resp.json()["mode"] == "react"
 
     def test_plan_execute_mode(self, client):
@@ -35,20 +29,15 @@ class TestCreateSession:
 
 
 class TestDeleteSession:
-    def test_delete_existing_session(self, client):
+    def test_delete_existing_session_makes_chat_unavailable(self, client):
         session_id = client.post("/api/sessions", json={}).json()["session_id"]
         resp = client.delete(f"/api/sessions/{session_id}")
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
+        resp = client.post(f"/api/chat/{session_id}", json={"message": "hi"})
+        assert resp.status_code == 404
 
     def test_delete_nonexistent_session_still_ok(self, client):
         resp = client.delete("/api/sessions/does-not-exist")
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
-
-    def test_deleted_session_not_found_for_chat(self, client):
-        session_id = client.post("/api/sessions", json={}).json()["session_id"]
-        client.delete(f"/api/sessions/{session_id}")
-        resp = client.post(f"/api/chat/{session_id}", json={"message": "hi"})
-        assert resp.status_code == 404
-
