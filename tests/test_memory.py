@@ -5,7 +5,7 @@ import pytest
 from web_api import runtime
 
 from harness import HarnessConfig
-from memory import MemoryManager, MemorySnapshot, MemorySummary
+from memory import MemoryManager, MemorySnapshot, MemorySummary, MemoryTurn
 
 
 class _SummaryRunnable:
@@ -144,21 +144,106 @@ def test_summary_is_prepended_to_current_user_when_no_recent_user_exists():
 
 
 @pytest.mark.asyncio
-async def test_summary_failure_falls_back_to_a_hard_bound(caplog):
+async def test_summary_failure_preserves_history_without_hard_bound(caplog):
     manager = MemoryManager(_config(memory_max_tokens=200, memory_target_tokens=100))
     for index in range(5):
         manager.commit_turn(str(index) + "甲" * 100, "乙" * 100)
+    original_turns = [(turn.user, turn.assistant) for turn in manager.turns]
     manager._summary_runnable = lambda: _SummaryRunnable(error=RuntimeError("provider down"))
     tokens_before = manager.estimate_tokens("当前问题")
 
     with caplog.at_level(logging.INFO, logger="memory"):
-        await manager.acompact("当前问题")
+        compacted = await manager.acompact("当前问题")
 
     assert f"memory compact starting tokens_before={tokens_before}" in caplog.text
-    assert "memory summary failed; applying deterministic trim" in caplog.text
+    assert "memory summary failed; preserving history unchanged" in caplog.text
+    assert compacted is False
     assert manager.summary.is_empty()
-    assert len(manager.turns) <= 1
-    assert manager.estimate_tokens("当前问题") <= manager.config.memory_target_tokens + 20
+    assert [(turn.user, turn.assistant) for turn in manager.turns] == original_turns
+    assert manager.estimate_tokens("当前问题") == tokens_before
+
+
+def test_oversized_current_user_is_counted_but_never_modified_or_summarized():
+    manager = MemoryManager(_config(memory_max_tokens=200, memory_target_tokens=100))
+    current_user = "当前问题" + "甲" * 500
+    runnable = _SummaryRunnable()
+    manager._summary_runnable = lambda: runnable
+
+    compacted = manager.compact(current_user)
+    messages = manager._memory_messages(current_user)
+
+    assert manager.estimate_tokens(current_user) > manager.config.memory_max_tokens
+    assert compacted is False
+    assert runnable.calls == []
+    assert messages[-1].content == current_user
+
+
+def test_current_user_can_trigger_compaction_but_only_history_is_summarized():
+    manager = MemoryManager(_config(memory_max_tokens=300, memory_target_tokens=295))
+    history_user = "历史问题" + "甲" * 100
+    history_assistant = "历史回答" + "乙" * 100
+    current_user = "当前问题" + "丙" * 400
+    manager.commit_turn(history_user, history_assistant)
+    runnable = _SummaryRunnable()
+    manager._summary_runnable = lambda: runnable
+    manager._summary_reduce_runnable = lambda: runnable
+
+    messages = manager.prepare_messages(current_user)
+
+    assert runnable.calls
+    assert history_user in runnable.calls[0][0]["turns"]
+    assert current_user not in runnable.calls[0][0]["turns"]
+    assert manager.turns == []
+    assert messages[-1].content.endswith("\n\n" + current_user)
+
+
+def test_chunks_pack_complete_turns_without_splitting_them():
+    manager = MemoryManager(_config(memory_max_tokens=100, memory_target_tokens=50))
+    turns = [
+        MemoryTurn(user="用户一" + "甲" * 70, assistant="回答一" + "乙" * 70),
+        MemoryTurn(user="用户二" + "丙" * 70, assistant="回答二" + "丁" * 70),
+    ]
+
+    chunks = manager._chunks(turns)
+
+    assert chunks == [turn.render() for turn in turns]
+
+
+def test_oversized_turn_fragments_keep_role_and_continuation_labels():
+    manager = MemoryManager(_config(memory_max_tokens=100, memory_target_tokens=50))
+    turn = MemoryTurn(
+        user=("第一段。\n\n" + "甲" * 300),
+        assistant=("第二段。\n\n" + "乙" * 300),
+    )
+
+    fragments = manager._turn_fragments(turn, max_tokens=100)
+
+    assert len(fragments) > 2
+    assert all(fragment.startswith(("User", "Assistant")) for fragment in fragments)
+    assert all("[part " in fragment for fragment in fragments)
+
+
+def test_existing_summary_is_reduced_and_same_boundary_snapshot_is_refreshed():
+    snapshot = MemorySnapshot(
+        summary=MemorySummary(key_facts=["旧事实" + "甲" * 500]),
+        covered_from_seq=1,
+        covered_through_seq=2,
+        covered_message_count=2,
+    )
+    manager = MemoryManager(_config(memory_max_tokens=200, memory_target_tokens=100))
+    manager.restore(snapshot, [])
+    manager._summary_reduce_runnable = lambda: _SummaryRunnable(
+        MemorySummary(key_facts=["压缩后的事实"])
+    )
+
+    compacted = manager.compact("")
+
+    assert compacted is True
+    assert manager.summary.key_facts == ["压缩后的事实"]
+    pending = manager.pending_snapshot()
+    assert pending is not None
+    assert pending.covered_through_seq == 2
+    assert pending.summary.key_facts == ["压缩后的事实"]
 
 
 def test_history_rebuild_ignores_non_text_rows():
@@ -192,8 +277,8 @@ async def test_successful_compaction_produces_incremental_snapshot():
     snapshot = manager.pending_snapshot()
     assert isinstance(snapshot, MemorySnapshot)
     assert snapshot.covered_from_seq == 1
-    assert snapshot.covered_through_seq == 8
-    assert snapshot.covered_message_count == 8
+    assert snapshot.covered_through_seq == 10
+    assert snapshot.covered_message_count == 10
     manager.mark_snapshot_persisted(snapshot.covered_through_seq)
     assert manager.pending_snapshot() is None
 

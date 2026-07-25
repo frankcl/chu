@@ -168,7 +168,7 @@ def save_chat_summary(session_id: str, user_id: str, snapshot: dict[str, Any]) -
             for duplicate in rows[1:]:
                 s.delete(duplicate)
 
-            if current is not None and incoming_through <= current.covered_through_seq:
+            if current is not None and incoming_through < current.covered_through_seq:
                 return True
             if current is not None and incoming_count < current.covered_message_count:
                 return False

@@ -314,6 +314,14 @@ def test_chat_summary_insert_update_and_incremental_restore(db_rollback):
         assert row.id == first_id
         assert row.covered_through_seq == 4
 
+    reduced = {**second, "summary": {"goals": ["compressed"]}, "estimated_tokens": 2}
+    assert db.save_chat_summary("c1", "userA", reduced) is True
+    with _Session() as s:
+        row = s.query(ChatSummary).filter(ChatSummary.session_id == "c1").one()
+        assert row.id == first_id
+        assert row.summary == {"goals": ["compressed"]}
+        assert row.estimated_tokens == 2
+
     state = db.load_memory_state("c1", "userA")
     assert state["snapshot"]["covered_through_seq"] == 4
     assert [message["seq"] for message in state["messages"]] == [5, 6]
