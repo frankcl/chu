@@ -52,7 +52,7 @@ Centralized runtime safety, configured per-session via `HarnessConfig` (env defa
 - **`apply_llm_retry`**: exponential-backoff retry on transient provider errors. Order matters — call `bind_tools`/`with_structured_output` on the raw `BaseChatModel` **before** wrapping with retry, since retry returns a `Runnable`, not a `BaseChatModel`.
 - `recursion_limit` is *not* enforced here; it is passed to LangGraph at `astream()` time via `config={"recursion_limit": ...}`.
 
-Env knobs: `RECURSION_LIMIT`, `IDLE_TIMEOUT_SECONDS`, `PER_TOOL_TIMEOUT_SECONDS`, `MAX_TOOL_CALLS`, `MAX_TOKENS_BUDGET`, `LLM_MAX_RETRIES`, `MEMORY_MAX_TOKENS`, `MEMORY_TARGET_TOKENS`, `MEMORY_KEEP_RECENT_TURNS`, `MEMORY_TTL_SECONDS`, `MEMORY_SWEEP_INTERVAL_SECONDS`, `TOOL_ALLOWLIST`, `TOOL_DENYLIST`.
+Env knobs: `RECURSION_LIMIT`, `IDLE_TIMEOUT_SECONDS`, `PER_TOOL_TIMEOUT_SECONDS`, `MAX_TOOL_CALLS`, `MAX_TOKENS_BUDGET`, `LLM_MAX_RETRIES`, `MEMORY_MAX_TOKENS`, `MEMORY_TARGET_TOKENS`, `MEMORY_KEEP_RECENT_TURNS`, `MEMORY_SUMMARY_CONTEXT_TOKENS`, `MEMORY_TTL_SECONDS`, `MEMORY_SWEEP_INTERVAL_SECONDS`, `TOOL_ALLOWLIST`, `TOOL_DENYLIST`.
 
 ### Skills (`agent/skills.py` + `skills/`)
 

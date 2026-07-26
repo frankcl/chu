@@ -31,6 +31,7 @@ class TestHarnessConfigFromEnv:
             "MAX_SKILL_SCRIPT_CALLS_PER_TASK", "MAX_TOKENS_BUDGET", "LLM_MAX_RETRIES",
             "TOOL_ALLOWLIST", "TOOL_DENYLIST", "ENABLED_GUARDRAILS",
             "SENSITIVE_OUTPUT_SCAN", "SENSITIVE_OUTPUT_ACTION",
+            "MEMORY_SUMMARY_CONTEXT_TOKENS",
         ):
             monkeypatch.delenv(key, raising=False)
         cfg = HarnessConfig.from_env()
@@ -47,6 +48,7 @@ class TestHarnessConfigFromEnv:
         assert cfg.enabled_guardrails == ["identity_privacy", "safety"]
         assert cfg.sensitive_output_scan is True
         assert cfg.sensitive_output_action == "redact"
+        assert cfg.memory_summary_context_tokens == 128_000
 
     def test_reads_env(self, monkeypatch):
         monkeypatch.setenv("RECURSION_LIMIT", "7")
@@ -59,6 +61,7 @@ class TestHarnessConfigFromEnv:
         monkeypatch.setenv("ENABLED_GUARDRAILS", "identity_privacy")
         monkeypatch.setenv("SENSITIVE_OUTPUT_SCAN", "false")
         monkeypatch.setenv("SENSITIVE_OUTPUT_ACTION", "block")
+        monkeypatch.setenv("MEMORY_SUMMARY_CONTEXT_TOKENS", "64000")
         cfg = HarnessConfig.from_env()
         assert cfg.recursion_limit == 7
         assert cfg.idle_timeout == 12.5
@@ -70,6 +73,7 @@ class TestHarnessConfigFromEnv:
         assert cfg.enabled_guardrails == ["identity_privacy"]
         assert cfg.sensitive_output_scan is False
         assert cfg.sensitive_output_action == "block"
+        assert cfg.memory_summary_context_tokens == 64_000
 
     def test_invalid_sensitive_output_action_falls_back_to_redact(self):
         cfg = HarnessConfig(sensitive_output_action="unknown")

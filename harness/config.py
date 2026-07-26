@@ -38,6 +38,7 @@ class HarnessConfig:
     memory_max_tokens: int = 24_000
     memory_target_tokens: int = 12_000
     memory_keep_recent_turns: int = 4
+    memory_summary_context_tokens: int = 128_000
     memory_ttl_seconds: float = 3_600.0
 
     def __post_init__(self) -> None:
@@ -52,6 +53,8 @@ class HarnessConfig:
             raise ValueError("memory_target_tokens must be positive and smaller than memory_max_tokens")
         if self.memory_keep_recent_turns <= 0:
             raise ValueError("memory_keep_recent_turns must be positive")
+        if self.memory_summary_context_tokens <= 0:
+            raise ValueError("memory_summary_context_tokens must be positive")
         if self.memory_ttl_seconds <= 0:
             raise ValueError("memory_ttl_seconds must be positive")
 
@@ -77,6 +80,9 @@ class HarnessConfig:
             memory_max_tokens=env_int("MEMORY_MAX_TOKENS", 24_000, logger),
             memory_target_tokens=env_int("MEMORY_TARGET_TOKENS", 12_000, logger),
             memory_keep_recent_turns=env_int("MEMORY_KEEP_RECENT_TURNS", 4, logger),
+            memory_summary_context_tokens=env_int(
+                "MEMORY_SUMMARY_CONTEXT_TOKENS", 128_000, logger
+            ),
             memory_ttl_seconds=env_float("MEMORY_TTL_SECONDS", 3_600.0, logger),
         )
 

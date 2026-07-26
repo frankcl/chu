@@ -15,8 +15,9 @@ from .prompts import SUMMARY_PROMPT, SUMMARY_REDUCE_PROMPT
 
 logger = get_logger("memory")
 
-_SUMMARY_CHUNK_TOKENS = 24_000
 _SUMMARY_FRAGMENT_OVERLAP_CHARS = 400
+_SUMMARY_RESPONSE_RESERVE_TOKENS = 4_096
+_SUMMARY_INPUT_SAFETY_RATIO = 0.95
 _MAX_TOOL_RESULTS = 4
 _MAX_TOOL_RESULT_CHARS = 800
 SUMMARY_VERSION = 1
@@ -230,20 +231,98 @@ class MemoryManager:
                 fragments.append(f"{role}{continuation}:\n{piece}")
         return fragments
 
-    def _chunks(self, turns: list[MemoryTurn]) -> list[str]:
-        max_tokens = min(self.config.memory_max_tokens, _SUMMARY_CHUNK_TOKENS)
-        chunks: list[str] = []
-        pending = ""
-        for turn in turns:
-            for piece in self._turn_fragments(turn, max_tokens):
-                candidate = f"{pending}\n\n{piece}".strip()
-                if pending and self._text_tokens(candidate) > max_tokens:
-                    chunks.append(pending)
-                    pending = ""
-                pending = f"{pending}\n\n{piece}".strip()
-        if pending:
-            chunks.append(pending)
-        return chunks
+    def _summary_input_limit(self) -> int:
+        """Usable input budget after reserving response and estimation headroom."""
+        context = self.config.memory_summary_context_tokens
+        return max(0, int((context - _SUMMARY_RESPONSE_RESERVE_TOKENS) * _SUMMARY_INPUT_SAFETY_RATIO))
+
+    def _summary_prompt_tokens(self, summary: MemorySummary, turns: str) -> int:
+        messages = SUMMARY_PROMPT.format_messages(
+            summary=summary.render() or "(none)",
+            turns=turns,
+        )
+        return count_tokens_approximately(messages, chars_per_token=2.0)
+
+    def _pack_summary_chunk(
+        self,
+        summary: MemorySummary,
+        items: list[tuple[str, MemoryTurn | None]],
+    ) -> tuple[str, int]:
+        """Return the largest oldest-prefix that fits the current summary request.
+
+        ``items`` is mutated only when one complete turn is too large: that turn is
+        replaced with role-labelled semantic fragments, which are then packed by
+        the same budget check.
+        """
+        input_limit = self._summary_input_limit()
+        if input_limit <= 0:
+            raise ValueError("summary context leaves no usable input budget")
+
+        low, high = 1, len(items)
+        best_count = 0
+        best_text = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = "\n\n".join(text for text, _ in items[:middle])
+            if self._summary_prompt_tokens(summary, candidate) <= input_limit:
+                best_count = middle
+                best_text = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best_count:
+            return best_text, best_count
+
+        text, source_turn = items[0]
+        if source_turn is None:
+            raise ValueError("summary fragment cannot fit configured context")
+        empty_prompt_tokens = self._summary_prompt_tokens(summary, "")
+        fragment_tokens = input_limit - empty_prompt_tokens - 32
+        if fragment_tokens < 64:
+            raise ValueError("existing summary leaves no room for older turns")
+        fragments = self._turn_fragments(source_turn, fragment_tokens)
+        if len(fragments) == 1 and fragments[0] == text:
+            raise ValueError("summary turn cannot fit configured context")
+        items[:1] = [(fragment, None) for fragment in fragments]
+        return self._pack_summary_chunk(summary, items)
+
+    async def _asummarize_turns(
+        self,
+        old: list[MemoryTurn],
+        run_config: dict | None,
+    ) -> MemorySummary:
+        runnable = self._summary_runnable()
+        summary = self.summary
+        items: list[tuple[str, MemoryTurn | None]] = [
+            (turn.render(), turn) for turn in old
+        ]
+        while items:
+            chunk, consumed = self._pack_summary_chunk(summary, items)
+            summary = await runnable.ainvoke(
+                {"summary": summary.render() or "(none)", "turns": chunk},
+                config=run_config,
+            )
+            del items[:consumed]
+        return summary
+
+    def _summarize_turns(
+        self,
+        old: list[MemoryTurn],
+        run_config: dict | None,
+    ) -> MemorySummary:
+        runnable = self._summary_runnable()
+        summary = self.summary
+        items: list[tuple[str, MemoryTurn | None]] = [
+            (turn.render(), turn) for turn in old
+        ]
+        while items:
+            chunk, consumed = self._pack_summary_chunk(summary, items)
+            summary = runnable.invoke(
+                {"summary": summary.render() or "(none)", "turns": chunk},
+                config=run_config,
+            )
+            del items[:consumed]
+        return summary
 
     def _update_snapshot(self, old: list[MemoryTurn]) -> None:
         if not old or not self._summary_persistable:
@@ -312,13 +391,7 @@ class MemoryManager:
             first_batch_size = 0
             old = self.turns[:batch_size]
             try:
-                runnable = self._summary_runnable()
-                summary = self.summary
-                for chunk in self._chunks(old):
-                    summary = await runnable.ainvoke(
-                        {"summary": summary.render() or "(none)", "turns": chunk},
-                        config=run_config,
-                    )
+                summary = await self._asummarize_turns(old, run_config)
                 self._commit_summary(old, summary)
                 changed = True
             except Exception as exc:
@@ -381,13 +454,7 @@ class MemoryManager:
             first_batch_size = 0
             old = self.turns[:batch_size]
             try:
-                runnable = self._summary_runnable()
-                summary = self.summary
-                for chunk in self._chunks(old):
-                    summary = runnable.invoke(
-                        {"summary": summary.render() or "(none)", "turns": chunk},
-                        config=run_config,
-                    )
+                summary = self._summarize_turns(old, run_config)
                 self._commit_summary(old, summary)
                 changed = True
             except Exception as exc:

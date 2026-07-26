@@ -29,17 +29,22 @@ def _config(**overrides):
         memory_max_tokens=overrides.get("memory_max_tokens", 500),
         memory_target_tokens=overrides.get("memory_target_tokens", 300),
         memory_keep_recent_turns=overrides.get("memory_keep_recent_turns", 2),
+        memory_summary_context_tokens=overrides.get(
+            "memory_summary_context_tokens", 128_000
+        ),
     )
 
 
 def test_default_memory_watermarks(monkeypatch):
     monkeypatch.delenv("MEMORY_MAX_TOKENS", raising=False)
     monkeypatch.delenv("MEMORY_TARGET_TOKENS", raising=False)
+    monkeypatch.delenv("MEMORY_SUMMARY_CONTEXT_TOKENS", raising=False)
 
     config = HarnessConfig.from_env()
 
     assert config.memory_max_tokens == 24_000
     assert config.memory_target_tokens == 12_000
+    assert config.memory_summary_context_tokens == 128_000
 
 
 def test_memory_package_exports_public_types_without_agent_reexport():
@@ -197,16 +202,127 @@ def test_current_user_can_trigger_compaction_but_only_history_is_summarized():
     assert messages[-1].content.endswith("\n\n" + current_user)
 
 
-def test_chunks_pack_complete_turns_without_splitting_them():
-    manager = MemoryManager(_config(memory_max_tokens=100, memory_target_tokens=50))
+def test_summary_packer_uses_context_budget_instead_of_memory_watermark():
+    manager = MemoryManager(_config(
+        memory_max_tokens=100,
+        memory_target_tokens=50,
+        memory_summary_context_tokens=5_500,
+    ))
     turns = [
-        MemoryTurn(user="用户一" + "甲" * 70, assistant="回答一" + "乙" * 70),
-        MemoryTurn(user="用户二" + "丙" * 70, assistant="回答二" + "丁" * 70),
+        MemoryTurn(user=f"用户{index}" + "甲" * 300, assistant="乙" * 300)
+        for index in range(3)
+    ]
+    items = [(turn.render(), turn) for turn in turns]
+
+    chunk, consumed = manager._pack_summary_chunk(MemorySummary(), items)
+
+    assert consumed == len(turns)
+    assert chunk == "\n\n".join(turn.render() for turn in turns)
+    assert manager._summary_prompt_tokens(MemorySummary(), chunk) <= manager._summary_input_limit()
+
+
+def test_summary_packer_removes_newest_turns_until_oldest_prefix_fits():
+    manager = MemoryManager(_config(memory_summary_context_tokens=5_000))
+    turns = [
+        MemoryTurn(user=f"用户{index}" + "甲" * 300, assistant="乙" * 300)
+        for index in range(3)
+    ]
+    items = [(turn.render(), turn) for turn in turns]
+
+    chunk, consumed = manager._pack_summary_chunk(MemorySummary(), items)
+
+    assert consumed == 1
+    assert chunk == turns[0].render()
+    assert manager._summary_prompt_tokens(MemorySummary(), chunk) <= manager._summary_input_limit()
+
+
+def test_summary_packer_fragments_only_when_one_turn_cannot_fit():
+    manager = MemoryManager(_config(memory_summary_context_tokens=4_800))
+    turn = MemoryTurn(user="甲" * 1_000, assistant="乙" * 1_000)
+    items = [(turn.render(), turn)]
+
+    chunk, consumed = manager._pack_summary_chunk(MemorySummary(), items)
+
+    assert consumed >= 1
+    assert "[part " in chunk
+    assert all(source_turn is None for _, source_turn in items)
+    assert manager._summary_prompt_tokens(MemorySummary(), chunk) <= manager._summary_input_limit()
+
+
+def test_each_dynamic_summary_call_uses_the_previous_summary_and_stays_in_budget():
+    manager = MemoryManager(_config(
+        memory_max_tokens=100,
+        memory_target_tokens=50,
+        memory_keep_recent_turns=1,
+        memory_summary_context_tokens=5_000,
+    ))
+    for index in range(4):
+        manager.commit_turn(f"用户{index}" + "甲" * 300, "乙" * 300)
+    runnable = _SummaryRunnable(MemorySummary(key_facts=["滚动摘要"]))
+    manager._summary_runnable = lambda: runnable
+
+    manager.compact("当前问题")
+
+    assert len(runnable.calls) >= 2
+    assert runnable.calls[0][0]["summary"] == "(none)"
+    assert "滚动摘要" in runnable.calls[1][0]["summary"]
+    for values, _ in runnable.calls:
+        summary = (
+            MemorySummary()
+            if values["summary"] == "(none)"
+            else MemorySummary(key_facts=["滚动摘要"])
+        )
+        assert manager._summary_prompt_tokens(summary, values["turns"]) <= manager._summary_input_limit()
+
+
+@pytest.mark.asyncio
+async def test_sync_and_async_summary_use_identical_dynamic_batches():
+    turns = [
+        MemoryTurn(user=f"用户{index}" + "甲" * 300, assistant="乙" * 300)
+        for index in range(3)
+    ]
+    sync_manager = MemoryManager(_config(memory_summary_context_tokens=5_000))
+    async_manager = MemoryManager(_config(memory_summary_context_tokens=5_000))
+    sync_runnable = _SummaryRunnable(MemorySummary(key_facts=["滚动摘要"]))
+    async_runnable = _SummaryRunnable(MemorySummary(key_facts=["滚动摘要"]))
+    sync_manager._summary_runnable = lambda: sync_runnable
+    async_manager._summary_runnable = lambda: async_runnable
+
+    sync_manager._summarize_turns(turns, None)
+    await async_manager._asummarize_turns(turns, None)
+
+    assert [call[0]["turns"] for call in sync_runnable.calls] == [
+        call[0]["turns"] for call in async_runnable.calls
     ]
 
-    chunks = manager._chunks(turns)
 
-    assert chunks == [turn.render() for turn in turns]
+def test_failure_after_one_dynamic_batch_preserves_summary_and_all_turns():
+    class _FailOnSecondCall(_SummaryRunnable):
+        def invoke(self, values, config=None):
+            result = super().invoke(values, config)
+            if len(self.calls) == 2:
+                raise RuntimeError("second batch failed")
+            return result
+
+    manager = MemoryManager(_config(
+        memory_max_tokens=100,
+        memory_target_tokens=50,
+        memory_keep_recent_turns=1,
+        memory_summary_context_tokens=5_000,
+    ))
+    for index in range(4):
+        manager.commit_turn(f"用户{index}" + "甲" * 300, "乙" * 300)
+    original_turns = list(manager.turns)
+    runnable = _FailOnSecondCall(MemorySummary(key_facts=["临时摘要"]))
+    manager._summary_runnable = lambda: runnable
+
+    compacted = manager.compact("当前问题")
+
+    assert len(runnable.calls) == 2
+    assert compacted is False
+    assert manager.summary.is_empty()
+    assert manager.turns == original_turns
+    assert manager.pending_snapshot() is None
 
 
 def test_oversized_turn_fragments_keep_role_and_continuation_labels():
@@ -305,6 +421,7 @@ def test_restore_uses_summary_and_tail_source_sequences():
     {"memory_max_tokens": 0},
     {"memory_max_tokens": 100, "memory_target_tokens": 100},
     {"memory_keep_recent_turns": 0},
+    {"memory_summary_context_tokens": 0},
     {"memory_ttl_seconds": 0},
 ])
 def test_invalid_memory_config_is_rejected(kwargs):
